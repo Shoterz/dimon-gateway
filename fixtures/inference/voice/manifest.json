@@ -1,0 +1,26 @@
+{
+  "fixture_contract_version": 1,
+  "cases": [
+    {
+      "case_id": "normal",
+      "lifecycle": "ready",
+      "outcome": "transcript",
+      "partials": ["Send John", "Send John Smith S$50"],
+      "transcript": "Send John Smith S$50 from savings."
+    },
+    {
+      "case_id": "nemotron-unavailable",
+      "lifecycle": "error",
+      "outcome": "error",
+      "reason_code": "UPSTREAM_UNAVAILABLE",
+      "message": "fixture Nemotron service is unavailable"
+    },
+    {
+      "case_id": "voice-busy",
+      "lifecycle": "error",
+      "outcome": "error",
+      "reason_code": "VOICE_BUSY",
+      "message": "fixture voice capacity is busy"
+    }
+  ]
+}

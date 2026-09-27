@@ -67,16 +67,10 @@ class InferenceModeTests(unittest.TestCase):
 
         self.assertEqual(raised.exception.reason_code, "INVALID_LOCAL_INFERENCE_CONFIG")
 
-    def test_unimplemented_modes_fail_with_typed_configuration_errors(self) -> None:
-        expected = {
-            "fixture": "FIXTURE_PROVIDER_UNAVAILABLE",
-            "remote": "REMOTE_PROVIDER_UNAVAILABLE",
-        }
-        for mode, reason_code in expected.items():
-            with self.subTest(mode=mode):
-                with self.assertRaises(ProviderConfigurationError) as raised:
-                    build_inference_providers(mode, {})
-                self.assertEqual(raised.exception.reason_code, reason_code)
+    def test_unimplemented_remote_mode_fails_with_typed_configuration_error(self) -> None:
+        with self.assertRaises(ProviderConfigurationError) as raised:
+            build_inference_providers("remote", {})
+        self.assertEqual(raised.exception.reason_code, "REMOTE_PROVIDER_UNAVAILABLE")
 
     def test_provider_bundle_is_immutable(self) -> None:
         providers = InferenceProviders(

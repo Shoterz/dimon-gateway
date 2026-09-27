@@ -1,0 +1,15 @@
+{
+  "fixture_contract_version": 1,
+  "cases": [
+    {
+      "case_id": "normal",
+      "outcome": "wav"
+    },
+    {
+      "case_id": "kokoro-unavailable",
+      "outcome": "error",
+      "reason_code": "UPSTREAM_UNAVAILABLE",
+      "message": "fixture Kokoro service is unavailable"
+    }
+  ]
+}

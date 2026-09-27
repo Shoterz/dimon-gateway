@@ -12,6 +12,13 @@ from .inference import (
     ProviderConfigurationError,
     parse_inference_mode,
 )
+from .fixture_inference import (
+    FixtureCatalog,
+    FixtureExtractor,
+    FixtureRecognizer,
+    FixtureSynthesizer,
+    FixtureVoiceLifecycle,
+)
 from .model_adapter import QwenTransferExtractor
 from .speech import KokoroSynthesizer
 from .voice import NemotronClient, NemotronLifecycleClient
@@ -52,9 +59,24 @@ def build_inference_providers(
 ) -> InferenceProviders:
     selected_mode = parse_inference_mode(mode)
     if selected_mode == "fixture":
-        raise ProviderConfigurationError(
-            "FIXTURE_PROVIDER_UNAVAILABLE",
-            "fixture providers are not installed yet",
+        fixture_root = Path(__file__).resolve().parents[2] / "fixtures" / "inference"
+        voice_case = env.get("DIMON_FIXTURE_VOICE_CASE", "normal").strip() or "normal"
+        speech_case = env.get("DIMON_FIXTURE_SPEECH_CASE", "normal").strip() or "normal"
+        return InferenceProviders(
+            mode="fixture",
+            extractor=FixtureExtractor(FixtureCatalog.load(fixture_root / "manifest.json")),
+            recognizer=FixtureRecognizer.load(
+                fixture_root / "voice" / "manifest.json",
+                voice_case,
+            ),
+            voice_lifecycle=FixtureVoiceLifecycle.load(
+                fixture_root / "voice" / "manifest.json",
+                voice_case,
+            ),
+            synthesizer=FixtureSynthesizer.load(
+                fixture_root / "speech" / "manifest.json",
+                speech_case,
+            ),
         )
     if selected_mode == "remote":
         raise ProviderConfigurationError(
