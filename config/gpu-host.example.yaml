@@ -1,0 +1,15 @@
+config_version: 1
+safety_reserve_mb: 512
+profiles:
+  qwen:
+    reserved_vram_mb: 7168
+    startup_timeout_seconds: 180
+    idle_timeout_seconds: 300
+  nemotron:
+    reserved_vram_mb: 1184
+    startup_timeout_seconds: 120
+    idle_timeout_seconds: 75
+  kokoro:
+    reserved_vram_mb: 2048
+    startup_timeout_seconds: 120
+    idle_timeout_seconds: 120
