@@ -1,0 +1,294 @@
+<div id="qwen-hands-explainer" class="qh-root">
+  <style>
+    #qwen-hands-explainer {
+      color: var(--foreground);
+      font-family: var(--font-sans);
+      width: 100%;
+    }
+    #qwen-hands-explainer * { box-sizing: border-box; }
+    #qwen-hands-explainer .qh-heading {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 16px;
+      margin-bottom: 14px;
+    }
+    #qwen-hands-explainer .qh-heading h2 { margin: 0; font-weight: 500; }
+    #qwen-hands-explainer .qh-kicker { color: var(--muted-foreground); }
+    #qwen-hands-explainer .qh-stage {
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 18px;
+      background: var(--card);
+      color: var(--card-foreground);
+    }
+    #qwen-hands-explainer .qh-flow {
+      display: grid;
+      grid-template-columns: repeat(5, minmax(0, 1fr));
+      gap: 9px;
+      align-items: stretch;
+    }
+    #qwen-hands-explainer .qh-node {
+      position: relative;
+      min-height: 116px;
+      padding: 12px;
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      background: var(--background);
+      color: var(--foreground);
+      opacity: .48;
+      transform: translateY(0);
+      transition: opacity 180ms ease, border-color 180ms ease, transform 180ms ease;
+    }
+    #qwen-hands-explainer .qh-node[data-active="true"] {
+      opacity: 1;
+      border-color: var(--viz-series-1);
+      transform: translateY(-3px);
+    }
+    #qwen-hands-explainer .qh-node[data-complete="true"] { opacity: .78; }
+    #qwen-hands-explainer .qh-node:not(:last-child)::after {
+      content: "→";
+      position: absolute;
+      right: -9px;
+      top: 45px;
+      z-index: 2;
+      color: var(--muted-foreground);
+      background: var(--card);
+      padding: 0 2px;
+    }
+    #qwen-hands-explainer .qh-node-label {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      margin-bottom: 9px;
+      font-weight: 500;
+    }
+    #qwen-hands-explainer .qh-node-label i { color: var(--viz-series-1); }
+    #qwen-hands-explainer .qh-code {
+      margin: 0;
+      color: var(--muted-foreground);
+      font-family: var(--font-mono);
+      overflow-wrap: anywhere;
+    }
+    #qwen-hands-explainer .qh-readout {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 14px;
+      align-items: center;
+      margin-top: 15px;
+      min-height: 48px;
+    }
+    #qwen-hands-explainer .qh-readout strong { font-weight: 500; }
+    #qwen-hands-explainer .qh-readout span { color: var(--muted-foreground); }
+    #qwen-hands-explainer .qh-controls { display: flex; gap: 8px; }
+    #qwen-hands-explainer button {
+      min-height: 36px;
+      padding: 7px 12px;
+      border: 1px solid var(--border);
+      border-radius: 9px;
+      background: var(--background);
+      color: var(--foreground);
+      cursor: pointer;
+    }
+    #qwen-hands-explainer button:disabled { opacity: .42; cursor: default; }
+    #qwen-hands-explainer .qh-principle {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+      margin-top: 12px;
+    }
+    #qwen-hands-explainer .qh-principle > div {
+      border-left: 3px solid var(--viz-series-2);
+      padding: 8px 10px;
+      background: color-mix(in srgb, var(--viz-series-2) 8%, transparent);
+      border-radius: 0 9px 9px 0;
+    }
+    #qwen-hands-explainer .qh-principle > div:last-child {
+      border-left-color: var(--viz-series-3);
+      background: color-mix(in srgb, var(--viz-series-3) 8%, transparent);
+    }
+    #qwen-hands-explainer .qh-principle b { display: block; font-weight: 500; }
+    #qwen-hands-explainer .qh-principle span { color: var(--muted-foreground); }
+    #qwen-hands-explainer .qh-history { margin-top: 22px; }
+    #qwen-hands-explainer .qh-history h3 { margin: 0 0 10px; font-weight: 500; }
+    #qwen-hands-explainer .qh-years {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 8px;
+    }
+    #qwen-hands-explainer .qh-year[aria-pressed="true"] {
+      border-color: var(--viz-series-4);
+      box-shadow: inset 0 -2px 0 var(--viz-series-4);
+    }
+    #qwen-hands-explainer .qh-era-detail {
+      margin-top: 10px;
+      padding: 12px 14px;
+      border-top: 1px solid var(--border);
+      display: grid;
+      grid-template-columns: minmax(100px, .35fr) 1fr;
+      gap: 14px;
+    }
+    #qwen-hands-explainer .qh-era-detail b { font-weight: 500; }
+    #qwen-hands-explainer .qh-era-detail span { color: var(--muted-foreground); }
+    #qwen-hands-explainer .qh-verdict {
+      margin-top: 14px;
+      padding: 12px 14px;
+      border: 1px dashed var(--border);
+      border-radius: 10px;
+      color: var(--muted-foreground);
+    }
+    #qwen-hands-explainer .qh-verdict strong { color: var(--foreground); font-weight: 500; }
+    @media (max-width: 760px) {
+      #qwen-hands-explainer .qh-flow { grid-template-columns: 1fr; }
+      #qwen-hands-explainer .qh-node { min-height: auto; }
+      #qwen-hands-explainer .qh-node:not(:last-child)::after {
+        content: "↓";
+        right: auto;
+        left: 50%;
+        top: auto;
+        bottom: -12px;
+      }
+      #qwen-hands-explainer .qh-principle { grid-template-columns: 1fr; }
+      #qwen-hands-explainer .qh-readout { grid-template-columns: 1fr; }
+      #qwen-hands-explainer .qh-controls { justify-content: stretch; }
+      #qwen-hands-explainer .qh-controls button { flex: 1; }
+      #qwen-hands-explainer .qh-era-detail { grid-template-columns: 1fr; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      #qwen-hands-explainer .qh-node { transition: none; }
+    }
+  </style>
+
+  <div class="qh-heading">
+    <h2>Where Qwen’s “hands” actually live</h2>
+    <span class="qh-kicker">Step <span id="qh-step-count" class="tabular-nums">1 / 5</span></span>
+  </div>
+
+  <section class="qh-stage" aria-label="Step-through model tool harness">
+    <div class="qh-flow" role="list" aria-label="Banking request flow">
+      <div class="qh-node" role="listitem" data-step="0">
+        <div class="qh-node-label"><i data-lucide="message-circle" aria-hidden="true"></i>User</div>
+        <p class="qh-code">“Send John Smith S$50 from savings.”</p>
+      </div>
+      <div class="qh-node" role="listitem" data-step="1">
+        <div class="qh-node-label"><i data-lucide="brain" aria-hidden="true"></i>Qwen</div>
+        <p class="qh-code">Predicts a constrained JSON proposal</p>
+      </div>
+      <div class="qh-node" role="listitem" data-step="2">
+        <div class="qh-node-label"><i data-lucide="braces" aria-hidden="true"></i>Contract</div>
+        <p class="qh-code">{ recipient, amount_minor, source, currency }</p>
+      </div>
+      <div class="qh-node" role="listitem" data-step="3">
+        <div class="qh-node-label"><i data-lucide="shield-check" aria-hidden="true"></i>Python harness</div>
+        <p class="qh-code">Validates → resolves IDs → checks policy</p>
+      </div>
+      <div class="qh-node" role="listitem" data-step="4">
+        <div class="qh-node-label"><i data-lucide="file-check-2" aria-hidden="true"></i>Draft</div>
+        <p class="qh-code">READY_FOR_REVIEW · ledger_effect: NONE</p>
+      </div>
+    </div>
+
+    <div class="qh-readout" aria-live="polite">
+      <div><strong id="qh-step-title"></strong> <span id="qh-step-detail"></span></div>
+      <div class="qh-controls">
+        <button type="button" id="qh-prev">Previous</button>
+        <button type="button" id="qh-next">Next</button>
+      </div>
+    </div>
+
+    <div class="qh-principle" aria-label="Division of responsibility">
+      <div><b>The model chooses words.</b><span> It proposes a name and arguments from a vocabulary we supplied.</span></div>
+      <div><b>The harness owns reality.</b><span> It decides whether any fixed Python function runs and what that function may change.</span></div>
+    </div>
+  </section>
+
+  <section class="qh-history" aria-label="History of language-model tool use">
+    <h3>The idea arrived before the reliable product</h3>
+    <div class="qh-years" role="group" aria-label="Select an era">
+      <button class="qh-year" type="button" data-era="2022" aria-pressed="true">2022</button>
+      <button class="qh-year" type="button" data-era="2023" aria-pressed="false">2023</button>
+      <button class="qh-year" type="button" data-era="2024" aria-pressed="false">2024</button>
+      <button class="qh-year" type="button" data-era="2025" aria-pressed="false">2025</button>
+    </div>
+    <div class="qh-era-detail" aria-live="polite">
+      <b id="qh-era-title"></b>
+      <span id="qh-era-detail"></span>
+    </div>
+    <div class="qh-verdict"><strong>Primitive loop:</strong> ask model → parse action → execute tool → return observation → repeat. <strong>Refined agent:</strong> that same loop plus trained tool syntax, schemas, sandboxes, permissions, context management, error recovery, verification, and product UX.</div>
+  </section>
+
+  <script>
+    (() => {
+      const root = document.getElementById('qwen-hands-explainer');
+      const steps = [
+        ['Intent enters as language.', 'No command has run; this is ordinary text.'],
+        ['Qwen performs interpretation.', 'It has no operating-system access and only generates tokens.'],
+        ['The schema narrows the tokens.', 'The proposal can describe one transfer shape, not arbitrary Python.'],
+        ['Python supplies the hands.', 'Deterministic code rejects, resolves, or calls one allow-listed operation.'],
+        ['Only a draft exists.', 'Execution would require a separate receipt and explicit approval path.']
+      ];
+      const eras = {
+        '2022': ['Research proves the loop', 'MRKL and ReAct describe language models routing to modules and interleaving reasoning with actions. The core idea is already visible.'],
+        '2023': ['Interfaces become standard', 'Toolformer, ChatGPT plugins, and JSON-schema function calling improve when to call tools and how to encode arguments.'],
+        '2024': ['Tool use becomes a platform feature', 'Claude tool use becomes generally available; computer use arrives in beta. This is not yet Claude Code.'],
+        '2025': ['Claude Code ships', 'Claude Code launches in February as a research preview: the old loop wrapped in a mature coding harness with terminal tools, context, safety gates, and verification.']
+      };
+      const initial = window.openai?.widgetState?.privateContent || {};
+      let step = Number.isInteger(initial.step) ? Math.max(0, Math.min(4, initial.step)) : 0;
+      let era = eras[initial.era] ? initial.era : '2022';
+      const nodes = [...root.querySelectorAll('.qh-node')];
+      const stepTitle = root.querySelector('#qh-step-title');
+      const stepDetail = root.querySelector('#qh-step-detail');
+      const stepCount = root.querySelector('#qh-step-count');
+      const prev = root.querySelector('#qh-prev');
+      const next = root.querySelector('#qh-next');
+      const eraTitle = root.querySelector('#qh-era-title');
+      const eraDetail = root.querySelector('#qh-era-detail');
+
+      function persist() {
+        window.openai?.setWidgetState?.({
+          modelContent: { selectedStep: step + 1, selectedEra: era },
+          privateContent: { step, era }
+        }).catch(() => {});
+      }
+
+      function renderStep(save = false) {
+        nodes.forEach((node, index) => {
+          node.dataset.active = String(index === step);
+          node.dataset.complete = String(index < step);
+        });
+        stepTitle.textContent = steps[step][0];
+        stepDetail.textContent = steps[step][1];
+        stepCount.textContent = `${step + 1} / ${steps.length}`;
+        prev.disabled = step === 0;
+        next.disabled = step === steps.length - 1;
+        if (save) persist();
+      }
+
+      function renderEra(save = false) {
+        root.querySelectorAll('.qh-year').forEach(button => {
+          button.setAttribute('aria-pressed', String(button.dataset.era === era));
+        });
+        eraTitle.textContent = eras[era][0];
+        eraDetail.textContent = eras[era][1];
+        if (save) persist();
+      }
+
+      prev.addEventListener('click', () => { if (step > 0) { step -= 1; renderStep(true); } });
+      next.addEventListener('click', () => { if (step < steps.length - 1) { step += 1; renderStep(true); } });
+      root.querySelectorAll('.qh-year').forEach(button => {
+        button.addEventListener('click', () => { era = button.dataset.era; renderEra(true); });
+      });
+      window.addEventListener('openai:set_globals', event => {
+        const saved = event.detail?.globals?.widgetState?.privateContent;
+        if (!saved) return;
+        if (Number.isInteger(saved.step)) step = Math.max(0, Math.min(4, saved.step));
+        if (eras[saved.era]) era = saved.era;
+        renderStep();
+        renderEra();
+      });
+      renderStep();
+      renderEra();
+    })();
+  </script>
+</div>

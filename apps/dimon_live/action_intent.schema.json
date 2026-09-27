@@ -1,0 +1,97 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Dimon Live action proposal v4",
+  "oneOf": [
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "contract_version",
+        "kind",
+        "source_account_ref",
+        "source_evidence",
+        "recipient_label",
+        "recipient_evidence",
+        "currency",
+        "payment_reference",
+        "reference_evidence",
+        "requested_execution_date"
+      ],
+      "properties": {
+        "contract_version": {"const": 3},
+        "kind": {"const": "BENEFICIARY_TRANSFER"},
+        "source_account_ref": {"type": ["string", "null"]},
+        "source_evidence": {"type": ["string", "null"]},
+        "recipient_label": {"type": ["string", "null"]},
+        "recipient_evidence": {"type": ["string", "null"]},
+        "currency": {"const": "SGD"},
+        "payment_reference": {"type": ["string", "null"]},
+        "reference_evidence": {"type": ["string", "null"]},
+        "requested_execution_date": {"type": "null"}
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "contract_version",
+        "kind",
+        "source_account_ref",
+        "source_evidence",
+        "mobile_proxy",
+        "proxy_evidence",
+        "currency",
+        "payment_reference",
+        "reference_evidence",
+        "requested_execution_date"
+      ],
+      "properties": {
+        "contract_version": {"const": 3},
+        "kind": {"const": "PAYNOW_MOBILE_TRANSFER"},
+        "source_account_ref": {"type": ["string", "null"]},
+        "source_evidence": {"type": ["string", "null"]},
+        "mobile_proxy": {"type": ["string", "null"]},
+        "proxy_evidence": {"type": ["string", "null"]},
+        "currency": {"const": "SGD"},
+        "payment_reference": {"type": ["string", "null"]},
+        "reference_evidence": {"type": ["string", "null"]},
+        "requested_execution_date": {"type": "null"}
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "contract_version",
+        "kind",
+        "source_account_ref",
+        "source_evidence",
+        "items",
+        "currency",
+        "requested_execution_date"
+      ],
+      "properties": {
+        "contract_version": {"const": 4},
+        "kind": {"const": "BENEFICIARY_TRANSFER_BATCH"},
+        "source_account_ref": {"type": ["string", "null"]},
+        "source_evidence": {"type": ["string", "null"]},
+        "items": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 4,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["recipient_label", "recipient_evidence"],
+            "properties": {
+              "recipient_label": {"type": "string", "minLength": 1},
+              "recipient_evidence": {"type": "string", "minLength": 1}
+            }
+          }
+        },
+        "currency": {"const": "SGD"},
+        "requested_execution_date": {"type": "null"}
+      }
+    }
+  ]
+}

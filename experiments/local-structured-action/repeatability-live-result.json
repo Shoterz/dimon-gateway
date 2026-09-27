@@ -1,0 +1,27 @@
+{
+  "date": "2026-09-22",
+  "model": "qwen35-9b-abliterated-q5",
+  "request": "Send John Smith S$50 from my savings account.",
+  "configuration": {
+    "temperature": 0,
+    "max_tokens": 256,
+    "enable_thinking": false,
+    "schema_constrained": true
+  },
+  "summary": {
+    "runs": 5,
+    "exact_matches": 5,
+    "exact_match_rate": 1.0,
+    "ledger_mutations": 0,
+    "average_latency_ms": 1846.6,
+    "minimum_latency_ms": 1818.14,
+    "maximum_latency_ms": 1873.7
+  },
+  "runs": [
+    {"run": 1, "latency_ms": 1826.07, "golden_fields_match": true, "ledger_effect": "NONE"},
+    {"run": 2, "latency_ms": 1818.14, "golden_fields_match": true, "ledger_effect": "NONE"},
+    {"run": 3, "latency_ms": 1847.72, "golden_fields_match": true, "ledger_effect": "NONE"},
+    {"run": 4, "latency_ms": 1867.35, "golden_fields_match": true, "ledger_effect": "NONE"},
+    {"run": 5, "latency_ms": 1873.7, "golden_fields_match": true, "ledger_effect": "NONE"}
+  ]
+}

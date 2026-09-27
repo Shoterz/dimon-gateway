@@ -1,0 +1,25 @@
+const SAFE_ERROR_NAME = /^[A-Za-z0-9_.-]{1,64}$/;
+
+export function describeVoiceFailure(stage, error) {
+  const errorName = SAFE_ERROR_NAME.test(error?.name || "") ? error.name : "UnknownError";
+  let status = "Voice could not start · reload and try again";
+  if (errorName === "NotAllowedError" || errorName === "SecurityError") {
+    status = "Microphone access denied · allow it in this website's settings";
+  } else if (errorName === "NotFoundError") {
+    status = "No microphone was found · use typed input";
+  } else if (stage === "worklet_module" || stage === "worklet_node") {
+    status = "iPhone audio processor failed · retry once after reloading";
+  } else if (stage === "socket") {
+    status = "Voice connection failed · reload and try again";
+  }
+  return {stage, errorName, status};
+}
+
+export function reportVoiceFailure(details, fetchImpl = fetch) {
+  return fetchImpl("/api/voice/diagnostics", {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({stage: details.stage, error_name: details.errorName}),
+    keepalive: true,
+  }).catch(() => undefined);
+}

@@ -1,0 +1,18 @@
+{
+  "accounts": {
+    "savings": {
+      "account_id": "acct_savings_01",
+      "balance_minor": 100000
+    }
+  },
+  "beneficiaries": {
+    "John Smith": {
+      "beneficiary_id": "beneficiary_john_smith_01",
+      "masked_destination": "•••• 4321"
+    },
+    "John Tan": {
+      "beneficiary_id": "beneficiary_john_tan_01",
+      "masked_destination": "•••• 9876"
+    }
+  }
+}

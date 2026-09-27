@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "RawBeneficiaryTransferIntent",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "kind",
+    "source_account_ref",
+    "recipient_label",
+    "amount_minor",
+    "currency",
+    "requested_execution_date"
+  ],
+  "properties": {
+    "kind": {
+      "const": "BENEFICIARY_TRANSFER"
+    },
+    "source_account_ref": {
+      "type": ["string", "null"],
+      "minLength": 1
+    },
+    "recipient_label": {
+      "type": "string",
+      "minLength": 1
+    },
+    "amount_minor": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "currency": {
+      "const": "SGD"
+    },
+    "requested_execution_date": {
+      "type": "null"
+    }
+  }
+}

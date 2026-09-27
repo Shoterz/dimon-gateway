@@ -1,0 +1,49 @@
+{
+  "request": "Send John S$50 from savings.",
+  "runs": [
+    {
+      "run": 1,
+      "latency_ms": 1913.0,
+      "model_intent_match": true,
+      "clarification": true,
+      "no_draft": true,
+      "ledger_effect": "NONE"
+    },
+    {
+      "run": 2,
+      "latency_ms": 1876.14,
+      "model_intent_match": true,
+      "clarification": true,
+      "no_draft": true,
+      "ledger_effect": "NONE"
+    },
+    {
+      "run": 3,
+      "latency_ms": 1940.63,
+      "model_intent_match": true,
+      "clarification": true,
+      "no_draft": true,
+      "ledger_effect": "NONE"
+    },
+    {
+      "run": 4,
+      "latency_ms": 1952.0,
+      "model_intent_match": true,
+      "clarification": true,
+      "no_draft": true,
+      "ledger_effect": "NONE"
+    },
+    {
+      "run": 5,
+      "latency_ms": 1797.14,
+      "model_intent_match": true,
+      "clarification": true,
+      "no_draft": true,
+      "ledger_effect": "NONE"
+    }
+  ],
+  "pass_count": 5,
+  "average_latency_ms": 1895.78,
+  "min_latency_ms": 1797.14,
+  "max_latency_ms": 1952.0
+}

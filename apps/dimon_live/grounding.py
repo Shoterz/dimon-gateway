@@ -1,0 +1,272 @@
+"""Deterministic evidence grounding for execution-critical transfer fields."""
+
+from __future__ import annotations
+
+import re
+import unicodedata
+from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
+
+
+class GroundingError(ValueError):
+    def __init__(self, reason_code: str):
+        super().__init__(reason_code)
+        self.reason_code = reason_code
+
+
+_SMALL_NUMBERS = {
+    "zero": 0,
+    "one": 1,
+    "two": 2,
+    "three": 3,
+    "four": 4,
+    "five": 5,
+    "six": 6,
+    "seven": 7,
+    "eight": 8,
+    "nine": 9,
+    "ten": 10,
+    "eleven": 11,
+    "twelve": 12,
+    "thirteen": 13,
+    "fourteen": 14,
+    "fifteen": 15,
+    "sixteen": 16,
+    "seventeen": 17,
+    "eighteen": 18,
+    "nineteen": 19,
+}
+_TENS = {
+    "twenty": 20,
+    "thirty": 30,
+    "forty": 40,
+    "fifty": 50,
+    "sixty": 60,
+    "seventy": 70,
+    "eighty": 80,
+    "ninety": 90,
+}
+_NUMBER_WORDS = set(_SMALL_NUMBERS) | set(_TENS) | {
+    "and",
+    "hundred",
+    "thousand",
+}
+_NUMERIC_AMOUNT = re.compile(
+    r"^(?P<prefix>(?:s\s*)?\$)?\s*"
+    r"(?P<number>(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?)"
+    r"\s*(?P<suffix>sgd|dollars?|dollar)?$",
+    re.IGNORECASE,
+)
+_ANY_NUMERIC_AMOUNT_MENTION = re.compile(
+    r"(?<!\w)(?:-\s*)?(?:(?:(?:s\s*)?\$|sgd|usd|eur|gbp|aud|jpy)\s*"
+    r"(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?|"
+    r"(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?\s*"
+    r"(?:sgd|usd|eur|gbp|aud|jpy|dollars?|dollar))(?!\w)",
+    re.IGNORECASE,
+)
+_ANY_WORD_AMOUNT_MENTION = re.compile(
+    r"(?<!\w)(?:negative\s+)?(?:(?:" + "|".join(sorted(_NUMBER_WORDS - {"and"})) + r")"
+    r"(?:[\s-]+(?:" + "|".join(sorted(_NUMBER_WORDS)) + r"))*"
+    r"\s+(?:sgd|usd|eur|gbp|aud|jpy|dollars?|dollar))(?!\w)",
+    re.IGNORECASE,
+)
+
+
+@dataclass(frozen=True)
+class AmountMention:
+    amount_minor: int
+    evidence: str
+    start: int
+    end: int
+
+
+def normalize_evidence(value: str) -> str:
+    normalized = unicodedata.normalize("NFKC", value).casefold()
+    return " ".join(normalized.split())
+
+
+def is_grounded(original_text: str, evidence: str) -> bool:
+    normalized_evidence = normalize_evidence(evidence)
+    if not normalized_evidence:
+        return False
+    normalized_original = normalize_evidence(original_text)
+    return re.search(
+        rf"(?<!\w){re.escape(normalized_evidence)}(?!\w)",
+        normalized_original,
+    ) is not None
+
+
+def _amount_matches(value: str) -> list[re.Match[str]]:
+    normalized = unicodedata.normalize("NFKC", value)
+    matches = [
+        match
+        for pattern in (_ANY_NUMERIC_AMOUNT_MENTION, _ANY_WORD_AMOUNT_MENTION)
+        for match in pattern.finditer(normalized)
+    ]
+    matches.sort(key=lambda item: (item.start(), -(item.end() - item.start())))
+    non_overlapping = []
+    for match in matches:
+        if non_overlapping and match.start() < non_overlapping[-1].end():
+            continue
+        non_overlapping.append(match)
+    return non_overlapping
+
+
+def _amount_mentions(value: str) -> list[str]:
+    return [match.group(0) for match in _amount_matches(value)]
+
+
+def derive_amount_mentions_from_text(value: str) -> tuple[AmountMention, ...]:
+    matches = _amount_matches(value)
+    return tuple(
+        AmountMention(
+            parse_sgd_amount(match.group(0), require_full_match=True),
+            match.group(0),
+            match.start(),
+            match.end(),
+        )
+        for match in matches
+    )
+
+
+def derive_amount_from_text(value: str) -> tuple[int | None, str | None]:
+    """Derive one exact SGD amount from user-owned text, never model output."""
+
+    mentions = derive_amount_mentions_from_text(value)
+    if not mentions:
+        return None, None
+    if len(mentions) != 1:
+        raise GroundingError("AMBIGUOUS_AMOUNT")
+    return mentions[0].amount_minor, mentions[0].evidence
+
+
+def _minor_units_from_decimal(value: str) -> int:
+    if "." in value and len(value.rsplit(".", 1)[1]) > 2:
+        raise GroundingError("INVALID_AMOUNT")
+    try:
+        major = Decimal(value.replace(",", ""))
+    except InvalidOperation as exc:
+        raise GroundingError("INVALID_AMOUNT") from exc
+    minor = major * 100
+    if major <= 0 or minor != minor.to_integral_value():
+        raise GroundingError("INVALID_AMOUNT")
+    return int(minor)
+
+
+def _major_units_from_words(tokens: list[str]) -> int:
+    total = 0
+    current = 0
+    saw_number = False
+    saw_thousand = False
+    for token in tokens:
+        if token == "and":
+            if not saw_number:
+                raise GroundingError("INVALID_AMOUNT")
+            continue
+        if token in _SMALL_NUMBERS:
+            current += _SMALL_NUMBERS[token]
+            saw_number = True
+            continue
+        if token in _TENS:
+            current += _TENS[token]
+            saw_number = True
+            continue
+        if token == "hundred":
+            if current == 0:
+                current = 1
+            current *= 100
+            saw_number = True
+            continue
+        if token == "thousand":
+            if saw_thousand:
+                raise GroundingError("INVALID_AMOUNT")
+            if current == 0:
+                current = 1
+            total += current * 1000
+            current = 0
+            saw_number = True
+            saw_thousand = True
+            continue
+        raise GroundingError("CLARIFICATION_SCOPE_VIOLATION")
+    result = total + current
+    if not saw_number or result <= 0:
+        raise GroundingError("INVALID_AMOUNT")
+    return result
+
+
+def parse_sgd_amount(value: str, *, require_full_match: bool = False) -> int:
+    normalized_input = normalize_evidence(value)
+    if not normalized_input:
+        raise GroundingError("INVALID_AMOUNT")
+    if normalized_input.startswith("-") or re.search(
+        r"\bnegative\b",
+        normalized_input,
+    ):
+        raise GroundingError("INVALID_AMOUNT")
+    normalized = normalized_input.replace("-", " ")
+    if re.search(r"\b(?:usd|eur|gbp|aud|jpy)\b", normalized):
+        raise GroundingError("UNSUPPORTED_CURRENCY")
+    if re.search(r"\bor\b", normalized):
+        raise GroundingError("AMBIGUOUS_AMOUNT")
+
+    numeric = _NUMERIC_AMOUNT.fullmatch(normalized)
+    if numeric is not None:
+        if numeric.group("prefix") is None and numeric.group("suffix") is None:
+            if require_full_match:
+                raise GroundingError("CLARIFICATION_SCOPE_VIOLATION")
+            raise GroundingError("INVALID_AMOUNT")
+        return _minor_units_from_decimal(numeric.group("number"))
+
+    tokens = normalized.split()
+    if tokens and tokens[-1] in {"sgd", "dollar", "dollars"}:
+        number_tokens = tokens[:-1]
+        if number_tokens and all(token in _NUMBER_WORDS for token in number_tokens):
+            return _major_units_from_words(number_tokens) * 100
+
+    if require_full_match:
+        raise GroundingError("CLARIFICATION_SCOPE_VIOLATION")
+    raise GroundingError("INVALID_AMOUNT")
+
+
+def verify_amount(
+    original_text: str,
+    amount_minor: int | None,
+    evidence: str | None,
+) -> int | None:
+    if amount_minor is None and evidence is None:
+        return None
+    if (
+        type(amount_minor) is not int
+        or evidence is None
+        or not is_grounded(original_text, evidence)
+    ):
+        raise GroundingError("UNGROUNDED_AMOUNT")
+    if len(_amount_mentions(original_text)) != 1:
+        raise GroundingError("AMBIGUOUS_AMOUNT")
+    try:
+        parsed = parse_sgd_amount(evidence, require_full_match=True)
+    except GroundingError as exc:
+        if exc.reason_code == "CLARIFICATION_SCOPE_VIOLATION":
+            raise GroundingError("UNGROUNDED_AMOUNT") from exc
+        raise
+    if parsed != amount_minor:
+        raise GroundingError("AMOUNT_EVIDENCE_MISMATCH")
+    return parsed
+
+
+def verify_optional_reference(
+    original_text: str,
+    reference: str | None,
+    evidence: str | None,
+) -> str | None:
+    if reference is None and evidence is None:
+        return None
+    if (
+        not isinstance(reference, str)
+        or not reference.strip()
+        or not isinstance(evidence, str)
+        or not is_grounded(original_text, evidence)
+        or not is_grounded(evidence, reference)
+    ):
+        return None
+    return reference.strip()

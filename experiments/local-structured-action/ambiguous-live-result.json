@@ -1,0 +1,24 @@
+{
+  "user_request": "Send John S$50 from savings.",
+  "latency_ms": 5352.02,
+  "raw_model_output": "{\n  \"kind\": \"BENEFICIARY_TRANSFER\",\n  \"source_account_ref\": \"savings\",\n  \"recipient_label\": \"John\",\n  \"amount_minor\": 5000,\n  \"currency\": \"SGD\",\n  \"requested_execution_date\": null\n}",
+  "validated_intent": {
+    "kind": "BENEFICIARY_TRANSFER",
+    "source_account_ref": "savings",
+    "recipient_label": "John",
+    "amount_minor": 5000,
+    "currency": "SGD",
+    "requested_execution_date": null
+  },
+  "golden_fields_match": false,
+  "server_outcome": {
+    "outcome": "CLARIFICATION_REQUEST",
+    "field": "recipient_label",
+    "question": "Which saved John do you mean?",
+    "candidate_display_names": [
+      "John Smith",
+      "John Tan"
+    ],
+    "ledger_effect": "NONE"
+  }
+}
