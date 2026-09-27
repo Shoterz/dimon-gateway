@@ -144,7 +144,7 @@ def create_app(
     def resolve(request: Request, response: Response) -> SessionContext:
         try:
             context = manager.resolve_headers(
-                host=request.headers.get("host", "").split(":", 1)[0],
+                host=request.headers.get("host", "").lower(),
                 origin=request.headers.get("origin"),
                 cookie=request.cookies.get(manager.cookie_name),
                 access_assertion=request.headers.get("cf-access-jwt-assertion"),
@@ -247,7 +247,7 @@ def create_app(
     async def voice_session(websocket: WebSocket):
         try:
             context = manager.resolve_headers(
-                host=websocket.headers.get("host", "").split(":", 1)[0],
+                host=websocket.headers.get("host", "").lower(),
                 origin=websocket.headers.get("origin"),
                 cookie=websocket.cookies.get(manager.cookie_name),
                 access_assertion=websocket.headers.get("cf-access-jwt-assertion"),
