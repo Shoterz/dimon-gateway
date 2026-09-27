@@ -1,0 +1,66 @@
+.superpowers/
+.kilo/
+
+# Active environments and credentials
+.env
+.env.*
+!.env.example
+**/.env
+**/.env.*
+!**/.env.example
+*.pem
+*.key
+*.crt
+
+# Python environments, caches, and build output
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+build/
+dist/
+*.egg-info/
+
+# Runtime databases, audio, and local state
+runtime/
+apps/dimon_live/data/*.sqlite
+apps/dimon_live/data/*.sqlite3
+apps/dimon_live/data/*.db
+*.wav
+*.mp3
+*.flac
+*.ogg
+*.opus
+*.m4a
+
+# Model weights and compiled inference artifacts
+*.gguf
+*.safetensors
+*.onnx
+*.pt
+*.pth
+*.ckpt
+*.bin
+
+# Host-specific configuration
+config/models.yaml
+deploy/cloudflare/tunnel-config.yml
+deploy/cloudflare/current-state.json
+deploy/cloudflare/*.json
+!deploy/cloudflare/*.example.json
+
+# Editor and operating-system state
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*~
+
+# Supplied competition material is not redistributed by default
+docs/competition handbook/*.pdf
