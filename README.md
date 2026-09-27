@@ -42,6 +42,9 @@ receipts, approvals, visitor isolation, and SQLite mutation still run as real
 local application code. The browser displays a persistent `Fixture inference`
 badge whenever this mode is active.
 
+See the [development modes guide](docs/development.md) for every environment
+variable, fixture failure selector, and stable failure code.
+
 ## Runtime modes
 
 | Mode | Use | Inference source |
