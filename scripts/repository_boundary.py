@@ -124,6 +124,23 @@ def _git_candidates(root: Path) -> list[Path] | None:
     )
 
 
+def committed_candidates(root: Path, treeish: str = "HEAD") -> list[Path]:
+    """List file paths stored in a committed Git tree."""
+
+    completed = subprocess.run(
+        ["git", "-C", str(root), "ls-tree", "-r", "--name-only", "-z", treeish],
+        check=False,
+        capture_output=True,
+    )
+    if completed.returncode != 0:
+        raise RuntimeError("unable to inspect the committed Git tree")
+    return sorted(
+        Path(item.decode("utf-8", errors="surrogateescape"))
+        for item in completed.stdout.split(b"\0")
+        if item
+    )
+
+
 def _ignore_patterns(root: Path) -> list[str]:
     ignore_file = root / ".gitignore"
     if not ignore_file.is_file():
@@ -189,13 +206,46 @@ def inspect_candidates(root: Path, candidates: Iterable[Path]) -> list[Violation
     return violations
 
 
+def inspect_committed_tree(
+    root: Path, candidates: Iterable[Path], treeish: str = "HEAD"
+) -> list[Violation]:
+    """Inspect path names and text blobs exactly as stored in a Git tree."""
+
+    violations: list[Violation] = []
+    for relative in candidates:
+        for reason in path_violations(relative):
+            violations.append(Violation(relative, reason))
+
+        completed = subprocess.run(
+            ["git", "-C", str(root), "show", f"{treeish}:{relative.as_posix()}"],
+            check=False,
+            capture_output=True,
+        )
+        if completed.returncode != 0:
+            violations.append(Violation(relative, "unreadable committed blob"))
+            continue
+        try:
+            content = completed.stdout.decode("utf-8")
+        except UnicodeDecodeError:
+            continue
+        for reason in content_violations(content):
+            violations.append(Violation(relative, reason))
+    return violations
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=Path.cwd())
-    parser.add_argument(
+    modes = parser.add_mutually_exclusive_group()
+    modes.add_argument(
         "--filesystem",
         action="store_true",
         help="inspect the filesystem instead of Git's tracked/unignored candidates",
+    )
+    modes.add_argument(
+        "--committed",
+        action="store_true",
+        help="inspect paths and blobs exactly as committed at HEAD",
     )
     return parser
 
@@ -203,14 +253,20 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     root = args.root.resolve()
-    candidates = publication_candidates(root, prefer_git=not args.filesystem)
-    violations = inspect_candidates(root, candidates)
+    if args.committed:
+        candidates = committed_candidates(root)
+        violations = inspect_committed_tree(root, candidates)
+        subject = "committed file(s)"
+    else:
+        candidates = publication_candidates(root, prefer_git=not args.filesystem)
+        violations = inspect_candidates(root, candidates)
+        subject = "candidate file(s)"
     if violations:
         print(f"repository boundary failed: {len(violations)} violation(s)")
         for violation in violations:
             print(f"- {violation.path.as_posix()}: {violation.reason}")
         return 1
-    print(f"repository boundary passed: {len(candidates)} candidate file(s)")
+    print(f"repository boundary passed: {len(candidates)} {subject}")
     return 0
 
 

@@ -82,6 +82,21 @@ The boundary check rejects active environment files, databases, runtime state,
 generated audio, model artifacts, credentials, personal paths, and the supplied
 competition PDF.
 
+### Clean-clone verification
+
+Use a separate temporary directory to verify that setup does not read files
+from the source checkout:
+
+```bash
+git clone --local --no-hardlinks /path/to/dimon-gateway /tmp/dimon-gateway-clean
+cd /tmp/dimon-gateway-clean
+uv sync --locked --group dev
+uv run python -m unittest discover -s apps/dimon_live/tests -p 'test_*.py'
+uv run python -m unittest discover -s tests -p 'test_*.py'
+uv run python -m compileall -q apps tests
+scripts/check-repository-boundary --committed
+```
+
 ## Contributing
 
 Use small reviewed commits and run the locked test suite before opening a pull
