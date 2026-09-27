@@ -41,5 +41,28 @@ def main(
     )
 
 
+def dev_main(
+    *,
+    environ: Mapping[str, str] | None = None,
+    runner: ServerRunner | None = None,
+) -> None:
+    """Start Dimon with fixture inference unless a mode was selected explicitly."""
+
+    settings = dict(os.environ if environ is None else environ)
+    mode = settings.get("DIMON_INFERENCE_MODE") or "fixture"
+    settings["DIMON_INFERENCE_MODE"] = mode
+
+    missing = object()
+    previous: str | object = os.environ.get("DIMON_INFERENCE_MODE", missing)
+    os.environ["DIMON_INFERENCE_MODE"] = mode
+    try:
+        main(environ=settings, runner=runner)
+    finally:
+        if previous is missing:
+            os.environ.pop("DIMON_INFERENCE_MODE", None)
+        else:
+            os.environ["DIMON_INFERENCE_MODE"] = str(previous)
+
+
 if __name__ == "__main__":
     main()

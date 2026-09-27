@@ -98,7 +98,7 @@ def create_app(
     ):
         raise ValueError("providers cannot be combined with individual inference dependencies")
     selected_providers = providers or build_inference_providers(
-        os.environ.get("DIMON_INFERENCE_MODE", "local"),
+        os.environ.get("DIMON_INFERENCE_MODE", "fixture"),
         os.environ,
     )
     legacy_database: Database | None = None
@@ -177,6 +177,7 @@ def create_app(
         return {
             "role": context.role,
             "session_id": "owner" if context.role == "owner" else "visitor",
+            "inference_mode": application.state.inference_mode,
             "expires_in_seconds": None
             if context.role == "owner"
             else manager.visitor_ttl_seconds,

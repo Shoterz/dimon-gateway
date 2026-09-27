@@ -17,6 +17,7 @@ dependencies = [
 ]
 
 [project.scripts]
+dimon-dev = "apps.dimon_live.cli:dev_main"
 dimon-serve = "apps.dimon_live.cli:main"
 
 [dependency-groups]

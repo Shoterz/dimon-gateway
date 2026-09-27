@@ -14,8 +14,10 @@ class RepositoryDocumentationTests(unittest.TestCase):
 
         self.assertIn("Python 3.12", readme)
         self.assertIn("uv sync --locked --group dev", readme)
-        self.assertIn("uv run dimon-serve", readme)
+        self.assertIn("uv run dimon-dev", readme)
         self.assertIn("fixture", readme.lower())
+        self.assertIn("without model downloads", readme)
+        self.assertIn("Send John Smith S$50 from savings.", readme)
 
     def test_readme_explains_the_model_and_security_boundary(self) -> None:
         readme = (ROOT / "README.md").read_text(encoding="utf-8")

@@ -48,6 +48,7 @@ button { cursor: pointer; touch-action: manipulation; }
 .system-strip { gap: 18px; }
 .health { gap: 8px; color: var(--muted); font-size: 12px; }
 .mode-badge { padding: 6px 9px; border: 1px solid rgba(241, 202, 116, .45); color: var(--amber); font: 10px/1 ui-monospace, monospace; letter-spacing: .08em; text-transform: uppercase; }
+.fixture-badge { border-color: rgba(139, 184, 255, .55); color: var(--blue); }
 .health-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--amber); box-shadow: 0 0 0 4px rgba(241, 202, 116, .1); }
 .health.ready .health-dot { background: var(--signal); box-shadow: 0 0 0 4px rgba(120, 224, 207, .1); }
 
@@ -205,7 +206,7 @@ button:focus-visible, textarea:focus-visible, a:focus-visible { outline: 2px sol
   .system-strip { min-width: 0; gap: 9px; }
   .health { min-width: 0; }
   #health-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .mode-badge { display: none; }
+  .mode-badge:not(.fixture-badge) { display: none; }
   .command-column, .evidence-column {
     padding: 26px max(16px, env(safe-area-inset-right)) 26px max(16px, env(safe-area-inset-left));
   }

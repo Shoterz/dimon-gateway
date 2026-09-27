@@ -33,6 +33,7 @@ const ui = {
   commitStatus: document.querySelector("#commit-status"),
   healthIndicator: document.querySelector("#health-indicator"),
   healthText: document.querySelector("#health-text"),
+  inferenceModeBadge: document.querySelector("#inference-mode-badge"),
   modelLabel: document.querySelector("#model-label"),
   voiceButton: document.querySelector("#voice-button"),
   voiceStatus: document.querySelector("#voice-status"),
@@ -454,6 +455,14 @@ async function loadState() {
   ui.modelLabel.textContent = `Model · ${state.model}`;
 }
 
+async function loadSession() {
+  const response = await fetch("/api/session");
+  if (!response.ok) throw new Error(`Session returned HTTP ${response.status}`);
+  const session = await response.json();
+  const fixtureMode = session.inference_mode === "fixture";
+  ui.inferenceModeBadge.hidden = !fixtureMode;
+}
+
 function voiceUrl() {
   const scheme = window.location.protocol === "https:" ? "wss:" : "ws:";
   return `${scheme}//${window.location.host}/api/voice/session`;
@@ -767,7 +776,7 @@ document.querySelectorAll(".scenario-load").forEach(button => {
   });
 });
 
-loadState().catch(error => {
+Promise.all([loadSession(), loadState()]).catch(error => {
   ui.healthText.textContent = "Gateway unavailable";
   setOutcome("failed", "×", "Local app unavailable", "Start the FastAPI service and reload this page.", error.message);
 });
