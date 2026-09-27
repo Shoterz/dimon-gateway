@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import http.client
 import json
 import os
 import shutil
@@ -68,6 +69,20 @@ def listener_scope(port: int) -> str:
     return "loopback" if found else "absent"
 
 
+def probe_service(name: str, timeout: float = 1) -> bool:
+    port = SERVICE_PORTS[name]
+    path = "/health/live" if name == "gateway" else "/health"
+    try:
+        connection = http.client.HTTPConnection("127.0.0.1", port, timeout=timeout)
+        connection.request("GET", path)
+        response = connection.getresponse()
+        response.read(4097)
+        connection.close()
+        return response.status == 200 or (name == "gateway" and response.status == 401)
+    except OSError:
+        return False
+
+
 def gpu_free_mb() -> int:
     return NvidiaSmiTelemetry().free_vram_mb()
 
@@ -98,7 +113,7 @@ def collect_health(env: Mapping[str, str] | None = None) -> dict:
     services = {}
     for name, port in SERVICE_PORTS.items():
         scope = listener_scope(port)
-        ready = probe_tcp("127.0.0.1", port) and scope != "public"
+        ready = probe_service(name) and scope != "public"
         item: dict[str, str | bool] = {
             "ready": ready,
             "reason_code": (
@@ -143,7 +158,7 @@ def _check_runtime_inputs(mode: str) -> list[str]:
             scope = listener_scope(SERVICE_PORTS[name])
             if scope == "public":
                 failures.append(f"{name.upper()}_PUBLIC_BIND")
-            elif not probe_tcp("127.0.0.1", SERVICE_PORTS[name]):
+            elif not probe_service(name):
                 failures.append(f"{name.upper()}_UNREACHABLE")
     else:
         for name in ("qwen", "nemotron", "kokoro"):
@@ -240,7 +255,7 @@ def start_command(args) -> int:
             name
             for name in ("qwen", "nemotron", "kokoro")
             if listener_scope(SERVICE_PORTS[name]) != "loopback"
-            or not probe_tcp("127.0.0.1", SERVICE_PORTS[name])
+            or not probe_service(name)
         ]
         if unavailable:
             print(json.dumps({"status": "not_ready", "reason_code": "SHARED_BOUNDARY_INVALID", "services": unavailable}))
@@ -267,7 +282,7 @@ def start_command(args) -> int:
             profile = config.profiles[name]
             process = _managed(
                 name,
-                lambda port=SERVICE_PORTS[name]: probe_tcp("127.0.0.1", port),
+                lambda service=name: probe_service(service),
                 state_dir,
                 profile.startup_timeout_seconds,
             )

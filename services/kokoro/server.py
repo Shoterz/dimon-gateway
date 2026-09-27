@@ -1,37 +1,94 @@
-"""Bind the compatible Kokoro Gradio application to loopback."""
+"""Minimal loopback-only Kokoro synthesis service owned by this repository."""
 
 from __future__ import annotations
 
 import argparse
-import importlib.util
-import os
-from pathlib import Path
+import io
+from dataclasses import dataclass
+
+from pydantic import BaseModel, ConfigDict, Field
+
+
+class SpeechRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    text: str = Field(min_length=1, max_length=1_000)
+
+
+@dataclass(frozen=True)
+class KokoroPaths:
+    model: str
+    config: str
+    voice: str
+
+
+class KokoroEngine:
+    def __init__(self, paths: KokoroPaths):
+        import torch
+        from kokoro import KModel, KPipeline
+
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        model = KModel(config=paths.config, model=paths.model).to(device).eval()
+        pipeline = KPipeline(
+            lang_code="a",
+            repo_id="hexgrad/Kokoro-82M",
+            model=model,
+            device=device,
+        )
+        pipeline.voices["af_heart"] = torch.load(
+            paths.voice, map_location="cpu", weights_only=True
+        )
+        self.pipeline = pipeline
+
+    def synthesize(self, text: str) -> bytes:
+        import numpy as np
+        import soundfile as sf
+
+        segments = []
+        for result in self.pipeline(text, voice="af_heart", speed=1.15):
+            if result.audio is not None:
+                segments.append(result.audio.detach().cpu().numpy())
+        if not segments:
+            raise RuntimeError("KOKORO_EMPTY_OUTPUT")
+        audio = np.concatenate(segments)
+        output = io.BytesIO()
+        sf.write(output, audio, 24_000, format="WAV", subtype="PCM_16")
+        return output.getvalue()
+
+
+def create_app(engine: KokoroEngine):
+    from fastapi import FastAPI, HTTPException
+    from fastapi.responses import Response
+    app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
+
+    @app.get("/health")
+    async def health():
+        return {"status": "ready"}
+
+    @app.post("/v1/speech")
+    async def speech(request: SpeechRequest):
+        try:
+            # The gateway admits one synthesis at a time, so this dedicated
+            # process deliberately performs the model call synchronously.
+            wav = engine.synthesize(request.text)
+        except Exception as error:
+            raise HTTPException(status_code=503, detail="SYNTHESIS_UNAVAILABLE") from error
+        return Response(wav, media_type="audio/wav")
+
+    return app
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--app-dir", required=True)
+    parser.add_argument("--model", required=True)
+    parser.add_argument("--config", required=True)
+    parser.add_argument("--voice", required=True)
     parser.add_argument("--host", choices=("127.0.0.1",), required=True)
     parser.add_argument("--port", type=int, choices=(3001,), required=True)
     args = parser.parse_args()
-    app_dir = Path(args.app_dir).resolve()
-    os.chdir(app_dir)
-    spec = importlib.util.spec_from_file_location("dimon_kokoro_compat", app_dir / "app.py")
-    if spec is None or spec.loader is None:
-        raise RuntimeError("Kokoro compatibility application could not be loaded")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    demo = module.gr.TabbedInterface(
-        [module.ui(), module.tutorial()],
-        ["Multilingual TTS", "VoicePack Explanation"],
-        title="Kokoro TTS",
-    )
-    demo.queue().launch(
-        debug=False,
-        share=False,
-        server_name=args.host,
-        server_port=args.port,
-    )
+    engine = KokoroEngine(KokoroPaths(args.model, args.config, args.voice))
+    import uvicorn
+
+    uvicorn.run(create_app(engine), host=args.host, port=args.port)
 
 
 if __name__ == "__main__":

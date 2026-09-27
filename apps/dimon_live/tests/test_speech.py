@@ -2,13 +2,17 @@ import asyncio
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
+
+import httpx
 
 from apps.dimon_live.database import Database
 from apps.dimon_live.session_manager import SessionContext
-from apps.dimon_live.speech import SpeechService
+from apps.dimon_live.speech import KokoroSynthesizer, SpeechService
 
 
 WAV = b"RIFF" + (36).to_bytes(4, "little") + b"WAVEfmt " + b"\x00" * 28
+REAL_ASYNC_CLIENT = httpx.AsyncClient
 
 
 class SpeechTests(unittest.TestCase):
@@ -65,6 +69,40 @@ class SpeechTests(unittest.TestCase):
             )
         )
         self.assertIsNone(result)
+
+    def test_kokoro_client_uses_bounded_project_service_contract(self):
+        requests = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            requests.append(request)
+            return httpx.Response(200, headers={"content-type": "audio/wav"}, content=WAV)
+
+        def client_factory(**kwargs):
+            return REAL_ASYNC_CLIENT(
+                base_url=kwargs["base_url"], transport=httpx.MockTransport(handler)
+            )
+
+        with patch("apps.dimon_live.speech.httpx.AsyncClient", side_effect=client_factory):
+            audio = asyncio.run(KokoroSynthesizer("http://kokoro.test")("Safe result."))
+
+        self.assertEqual(audio, WAV)
+        self.assertEqual(requests[0].url.path, "/v1/speech")
+        self.assertEqual(requests[0].read(), b'{"text":"Safe result."}')
+
+    def test_kokoro_client_rejects_non_wav_response(self):
+        def client_factory(**kwargs):
+            return REAL_ASYNC_CLIENT(
+                base_url=kwargs["base_url"],
+                transport=httpx.MockTransport(
+                    lambda request: httpx.Response(
+                        200, headers={"content-type": "application/json"}, json={}
+                    )
+                ),
+            )
+
+        with patch("apps.dimon_live.speech.httpx.AsyncClient", side_effect=client_factory):
+            with self.assertRaises(RuntimeError):
+                asyncio.run(KokoroSynthesizer("http://kokoro.test")("Safe result."))
 
     def test_non_committed_result_is_not_sent_to_kokoro(self):
         called = []

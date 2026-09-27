@@ -52,8 +52,8 @@ class HostScriptTests(unittest.TestCase):
             "DIMON_KOKORO_REVISION": "f3ff3571791e39611d31c381e3a41a3af07b4987",
         }
         with patch(
-            "services.gpu_host.host_cli.probe_tcp",
-            side_effect=lambda host, port, timeout=1: port in {8080, 8004, 3001},
+            "services.gpu_host.host_cli.probe_service",
+            side_effect=lambda name, timeout=1: name != "gateway",
         ), patch(
             "services.gpu_host.host_cli.listener_scope",
             side_effect=lambda port: "loopback" if port in {8080, 8004, 3001} else "absent",
@@ -73,7 +73,7 @@ class HostScriptTests(unittest.TestCase):
         ), patch(
             "services.gpu_host.host_cli.runtime_directory", return_value=Path(temp)
         ), patch(
-            "services.gpu_host.host_cli.probe_tcp", return_value=True
+            "services.gpu_host.host_cli.probe_service", return_value=True
         ), patch(
             "services.gpu_host.host_cli.listener_scope",
             side_effect=lambda port: "public" if port == 3001 else "loopback",

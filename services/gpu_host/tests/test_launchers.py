@@ -34,7 +34,7 @@ class LauncherContractTests(unittest.TestCase):
         expectations = {
             "qwen": ("DIMON_QWEN_MODEL_PATH", "DIMON_LLAMA_SERVER_PATH", "--ctx-size"),
             "nemotron": ("DIMON_NEMOTRON_MODEL_PATH", "DIMON_NEMO_SPEECH_PATH", "nemotron-en"),
-            "kokoro": ("DIMON_KOKORO_MODEL_PATH", "DIMON_KOKORO_APP_DIR", "DIMON_KOKORO_VOICE_PATH"),
+            "kokoro": ("DIMON_KOKORO_MODEL_PATH", "DIMON_KOKORO_CONFIG_PATH", "DIMON_KOKORO_VOICE_PATH"),
         }
         for service, tokens in expectations.items():
             _, body = self.launcher(service)
@@ -47,13 +47,12 @@ class LauncherContractTests(unittest.TestCase):
             root = Path(temp)
             executable = root / "runtime"
             artifact = root / "model.bin"
-            app = root / "app"
+            config = root / "config.json"
             voice = root / "voice.pt"
             executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
             executable.chmod(0o755)
             artifact.write_bytes(b"model")
-            app.mkdir()
-            (app / "app.py").write_text("raise SystemExit(99)\n", encoding="utf-8")
+            config.write_text("{}", encoding="utf-8")
             voice.write_bytes(b"voice")
             environments = {
                 "qwen": {
@@ -67,8 +66,8 @@ class LauncherContractTests(unittest.TestCase):
                 },
                 "kokoro": {
                     "DIMON_KOKORO_MODEL_PATH": str(artifact),
+                    "DIMON_KOKORO_CONFIG_PATH": str(config),
                     "DIMON_KOKORO_VOICE_PATH": str(voice),
-                    "DIMON_KOKORO_APP_DIR": str(app),
                     "DIMON_KOKORO_PYTHON": str(executable),
                 },
             }
