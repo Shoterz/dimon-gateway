@@ -29,6 +29,7 @@ def valid_env() -> dict[str, str]:
         "DIMON_QWEN_REVISION": "test-revision",
         "DIMON_NEMOTRON_URL": "ws://127.0.0.1:8004/v1/realtime",
         "DIMON_KOKORO_URL": "http://127.0.0.1:3001",
+        "DIMON_KOKORO_REVISION": "test-kokoro-revision",
     }
 
 

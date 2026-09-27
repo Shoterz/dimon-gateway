@@ -20,6 +20,48 @@ class SpeechArtifact:
     mime_type: str = "audio/wav"
 
 
+def build_result_summary(
+    *,
+    status: str,
+    action_kind: str,
+    amount: int,
+    currency: str,
+    recipient_display: str | None,
+    reference: str | None = None,
+    batch_count: int | None = None,
+) -> str | None:
+    """Construct the only result text that local or gateway TTS may receive."""
+
+    if currency != "SGD" or not isinstance(amount, int) or amount <= 0:
+        return None
+    amount_text = f"{amount // 100} dollars and {amount % 100:02d} cents"
+    if status == "EXECUTED_SYNTHETIC_TRANSFER" and action_kind in {
+        "BENEFICIARY_TRANSFER",
+        "PAYNOW_MOBILE_TRANSFER",
+    }:
+        if not recipient_display:
+            return None
+        summary = f"Synthetic transfer complete. {amount_text} moved to {recipient_display}."
+    elif (
+        status == "EXECUTED_SYNTHETIC_BATCH"
+        and action_kind == "BENEFICIARY_TRANSFER_BATCH"
+    ):
+        if batch_count is not None:
+            summary = (
+                f"Synthetic batch complete. {amount_text} moved across "
+                f"{batch_count} transfers."
+            )
+        elif recipient_display:
+            summary = f"Synthetic batch complete. {amount_text} moved to {recipient_display}."
+        else:
+            return None
+    else:
+        return None
+    if reference:
+        summary += f" Reference {reference}."
+    return summary
+
+
 class KokoroSynthesizer:
     def __init__(self, base_url: str, *, timeout: float = 30.0):
         parsed = urlparse(base_url)
@@ -89,13 +131,26 @@ class SpeechService:
             amount = result.get("amount_minor")
             if not isinstance(recipient, str) or not isinstance(amount, int):
                 return None
-            return f"Synthetic transfer complete. {amount // 100} dollars and {amount % 100:02d} cents moved to {recipient}."
+            return build_result_summary(
+                status="EXECUTED_SYNTHETIC_TRANSFER",
+                action_kind="BENEFICIARY_TRANSFER",
+                amount=amount,
+                currency="SGD",
+                recipient_display=recipient,
+            )
         if result.get("outcome") == "EXECUTED_SYNTHETIC_BATCH":
             amount = result.get("amount_minor")
             count = len(result.get("resolved_actions") or [])
             if not isinstance(amount, int):
                 return None
-            return f"Synthetic batch complete. {amount // 100} dollars and {amount % 100:02d} cents moved across {count} transfers."
+            return build_result_summary(
+                status="EXECUTED_SYNTHETIC_BATCH",
+                action_kind="BENEFICIARY_TRANSFER_BATCH",
+                amount=amount,
+                currency="SGD",
+                recipient_display=None,
+                batch_count=count,
+            )
         return None
 
     async def speak_result(self, result: dict, context) -> SpeechArtifact | None:

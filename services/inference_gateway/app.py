@@ -7,17 +7,23 @@ import json
 import math
 import os
 
-from fastapi import FastAPI, Request, WebSocket
+from fastapi import FastAPI, Request, Response, WebSocket
 from pydantic import ValidationError
 
 from apps.dimon_live.model_adapter import validate_intent
+from apps.dimon_live.speech import build_result_summary
 
 from .auth import AccessTokenVerifier, require_access_identity
 from .config import GatewayConfig
-from .contracts import IntentRequest
+from .contracts import IntentRequest, SpeechRequest
 from .errors import GatewayError, gateway_error_response
 from .idempotency import IdempotencyStore
 from .limits import BoundedExecutor, SlidingWindowLimiter
+from .speech import (
+    KokoroGatewaySynthesizer,
+    SpeechSynthesizer,
+    validate_synthesis,
+)
 from .transcription import (
     NemotronPcm16Recognizer,
     TranscriptionGateway,
@@ -73,6 +79,9 @@ def create_gateway_app(
     transcription_recognizer: TranscriptionRecognizer | None = None,
     transcription_lease=None,
     transcription_limiter: SlidingWindowLimiter | None = None,
+    speech_synthesizer: SpeechSynthesizer | None = None,
+    speech_executor: BoundedExecutor | None = None,
+    speech_limiter: SlidingWindowLimiter | None = None,
 ) -> FastAPI:
     application = FastAPI(
         title="Dimon Inference Gateway",
@@ -93,6 +102,11 @@ def create_gateway_app(
         lease=transcription_lease,
         limiter=transcription_limiter,
     )
+    application.state.speech_synthesizer = (
+        speech_synthesizer or KokoroGatewaySynthesizer(config)
+    )
+    application.state.speech_executor = speech_executor or BoundedExecutor(1, 4, 30)
+    application.state.speech_limiter = speech_limiter or SlidingWindowLimiter(20, 60)
     application.add_exception_handler(GatewayError, gateway_error_response)
 
     @application.post("/v1/intent")
@@ -172,6 +186,68 @@ def create_gateway_app(
     @application.websocket("/v1/transcription")
     async def transcription(websocket: WebSocket):
         await application.state.transcription_gateway.handle(websocket)
+
+    @application.post("/v1/speech")
+    async def create_speech(request: Request):
+        identity = await require_access_identity(request)
+        try:
+            speech_request = SpeechRequest.model_validate(await _read_json(request))
+        except ValidationError as exc:
+            raise GatewayError("INVALID_REQUEST", "speech request is invalid", 400) from exc
+        request_id = str(speech_request.request_id)
+        retry_after = application.state.speech_limiter.check(identity.subject)
+        if retry_after is not None:
+            raise GatewayError(
+                "RATE_LIMITED",
+                "speech rate limit exceeded",
+                429,
+                request_id,
+            )
+        summary = build_result_summary(
+            status=speech_request.status,
+            action_kind=speech_request.action_kind,
+            amount=speech_request.amount,
+            currency=speech_request.currency,
+            recipient_display=speech_request.recipient_display,
+            reference=speech_request.reference,
+        )
+        if summary is None:
+            raise GatewayError(
+                "INVALID_REQUEST",
+                "speech request is invalid",
+                400,
+                request_id,
+            )
+
+        async def invoke():
+            try:
+                result = await application.state.speech_synthesizer(summary)
+                return validate_synthesis(result)
+            except GatewayError:
+                raise
+            except Exception as exc:
+                raise GatewayError(
+                    "UPSTREAM_UNAVAILABLE",
+                    "speech upstream did not return a valid WAV",
+                    503,
+                    request_id,
+                ) from exc
+
+        try:
+            result = await application.state.speech_executor.run(invoke)
+        except GatewayError as exc:
+            if exc.request_id is None:
+                exc.request_id = request_id
+            raise
+        return Response(
+            content=result.data,
+            media_type="audio/wav",
+            headers={
+                "X-Dimon-Request-Id": request_id,
+                "X-Dimon-Model-Revision": result.revision,
+                "X-Dimon-Latency-Ms": str(result.latency_ms),
+            },
+        )
 
     return application
 

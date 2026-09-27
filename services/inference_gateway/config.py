@@ -58,6 +58,7 @@ class GatewayConfig:
     max_raw_output_bytes: int
     nemotron_url: str
     kokoro_url: str
+    kokoro_revision: str
 
     @classmethod
     def from_env(cls, env: Mapping[str, str]) -> "GatewayConfig":
@@ -129,6 +130,9 @@ class GatewayConfig:
             "DIMON_KOKORO_URL",
             {"http", "https"},
         )
+        kokoro_revision = _required(env, "DIMON_KOKORO_REVISION")
+        if any(ord(character) < 33 or ord(character) > 126 for character in kokoro_revision):
+            raise ValueError("DIMON_KOKORO_REVISION contains unsafe characters")
         return cls(
             bind_host=bind_host,
             bind_port=bind_port,
@@ -144,4 +148,5 @@ class GatewayConfig:
             max_raw_output_bytes=max_raw_output_bytes,
             nemotron_url=nemotron,
             kokoro_url=kokoro,
+            kokoro_revision=kokoro_revision,
         )
