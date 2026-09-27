@@ -1,5 +1,6 @@
 .superpowers/
 .kilo/
+.worktrees/
 
 # Active environments and credentials
 .env
