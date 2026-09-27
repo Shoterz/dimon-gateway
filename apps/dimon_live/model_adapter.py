@@ -11,12 +11,33 @@ from urllib.error import URLError
 from urllib.request import Request, urlopen
 
 
-class InvalidModelOutput(ValueError):
+class InferenceFailure(Exception):
+    """An inference provider failed with a stable, public reason code."""
+
+    def __init__(self, reason_code: str, message: str):
+        super().__init__(message)
+        self.reason_code = reason_code
+
+
+class InvalidModelOutput(InferenceFailure, ValueError):
     """The model responded, but not with a valid bounded intent."""
 
+    def __init__(self, message: str):
+        super().__init__("INVALID_MODEL_OUTPUT", message)
 
-class ModelUnavailable(RuntimeError):
+
+class ModelUnavailable(InferenceFailure, RuntimeError):
     """The local model endpoint could not produce a response."""
+
+    def __init__(self, message: str):
+        super().__init__("MODEL_UNAVAILABLE", message)
+
+
+class FixtureNoMatch(InferenceFailure):
+    """Fixture mode has no exact declared case for the supplied input."""
+
+    def __init__(self, message: str = "fixture input is not declared"):
+        super().__init__("FIXTURE_NO_MATCH", message)
 
 
 @dataclass(frozen=True)

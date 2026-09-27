@@ -25,7 +25,7 @@ from .grounding import (
     normalize_evidence,
     verify_optional_reference,
 )
-from .model_adapter import Extractor, InvalidModelOutput, ModelUnavailable
+from .model_adapter import Extractor, InferenceFailure
 from .paynow import (
     PayNowLookupError,
     SyntheticPayNowDirectory,
@@ -147,23 +147,13 @@ class ActionService:
         trace: list[dict[str, Any]] = []
         try:
             extracted = self.extractor.extract(text)
-        except InvalidModelOutput as exc:
+        except InferenceFailure as exc:
             return self._nonexecuting(
                 request_id,
                 text,
                 "FAILED",
-                "INVALID_MODEL_OUTPUT",
+                exc.reason_code,
                 trace,
-                detail=str(exc),
-            )
-        except ModelUnavailable as exc:
-            return self._nonexecuting(
-                request_id,
-                text,
-                "FAILED",
-                "MODEL_UNAVAILABLE",
-                trace,
-                detail=str(exc),
             )
 
         intent = extracted.intent

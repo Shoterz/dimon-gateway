@@ -14,11 +14,13 @@ from fastapi.responses import HTMLResponse, Response
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from .database import Database
-from .model_adapter import Extractor, QwenTransferExtractor
+from .inference import InferenceProviders
+from .model_adapter import Extractor
+from .provider_factory import build_inference_providers
 from .service import ActionService
 from .session_manager import SessionBoundaryError, SessionContext, SessionManager
 from .speech import SpeechService
-from .voice import NemotronClient, NemotronLifecycleClient, VoiceBridge
+from .voice import VoiceBridge
 
 
 APP_DIR = Path(__file__).resolve().parent
@@ -88,7 +90,17 @@ def create_app(
     allowed_origins: set[str] | None = None,
     voice_bridge: VoiceBridge | None = None,
     speech_service: SpeechService | None = None,
+    providers: InferenceProviders | None = None,
 ) -> FastAPI:
+    if providers is not None and any(
+        dependency is not None
+        for dependency in (extractor, voice_bridge, speech_service)
+    ):
+        raise ValueError("providers cannot be combined with individual inference dependencies")
+    selected_providers = providers or build_inference_providers(
+        os.environ.get("DIMON_INFERENCE_MODE", "local"),
+        os.environ,
+    )
     legacy_database: Database | None = None
     if db_path is not None:
         legacy_database = Database(Path(db_path))
@@ -106,39 +118,15 @@ def create_app(
             max_visitor_sessions=int(os.environ.get("DIMON_MAX_VISITOR_SESSIONS", "25")),
         )
     )
-    selected_extractor = extractor or QwenTransferExtractor(
-        api_base=os.environ.get("DIMON_QWEN_API_BASE", "http://127.0.0.1:8080/v1"),
-        model=os.environ.get("DIMON_QWEN_MODEL", "qwen35-9b-abliterated-q5"),
-    )
+    selected_extractor = extractor or selected_providers.extractor
     application = FastAPI(title="Dimon Live", version="0.1.0")
     application.state.database = legacy_database
     application.state.session_manager = manager
     application.state.extractor = selected_extractor
+    application.state.inference_mode = selected_providers.mode
     application.state.voice_bridge = voice_bridge or VoiceBridge(
-        recognizer=NemotronClient(
-            os.environ.get(
-                "DIMON_NEMOTRON_URL", "ws://127.0.0.1:8004/v1/realtime"
-            ),
-            connect_timeout=float(os.environ.get("DIMON_NEMOTRON_CONNECT_TIMEOUT", "3")),
-            result_timeout=float(os.environ.get("DIMON_NEMOTRON_RESULT_TIMEOUT", "15")),
-        ),
-        lifecycle=NemotronLifecycleClient(
-            Path(
-                os.environ.get(
-                    "DIMON_NEMOTRON_CONTROL_SOCKET",
-                    str(
-                        Path(
-                            os.environ.get(
-                                "XDG_RUNTIME_DIR",
-                                f"/run/user/{os.getuid()}",
-                            )
-                        )
-                        / "jarvis-nemotron.ctl.sock"
-                    ),
-                )
-            ),
-            timeout=float(os.environ.get("DIMON_NEMOTRON_START_TIMEOUT", "120")),
-        ),
+        recognizer=selected_providers.recognizer,
+        lifecycle=selected_providers.voice_lifecycle,
         max_audio_bytes=int(os.environ.get("DIMON_MAX_AUDIO_BYTES", "4000000")),
         max_utterance_seconds=float(os.environ.get("DIMON_MAX_UTTERANCE_SECONDS", "30")),
         endpoint_silence_seconds=float(os.environ.get("DIMON_VOICE_ENDPOINT_SILENCE_SECONDS", "1.4")),
@@ -148,6 +136,7 @@ def create_app(
     application.state.speech_service = speech_service or SpeechService(
         base_url=os.environ.get("DIMON_KOKORO_URL", "http://127.0.0.1:3001"),
         audio_dir=Path(os.environ.get("DIMON_AUDIO_DIR", APP_DIR / "runtime" / "audio")),
+        synthesizer=selected_providers.synthesizer,
         max_wav_bytes=int(os.environ.get("DIMON_MAX_WAV_BYTES", str(8 * 1_048_576)),),
         ttl_seconds=int(os.environ.get("DIMON_VISITOR_TTL_SECONDS", "3600")),
     )

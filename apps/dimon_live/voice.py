@@ -14,6 +14,8 @@ from typing import Awaitable, Callable
 
 from starlette.websockets import WebSocketDisconnect
 
+from .model_adapter import InferenceFailure
+
 
 class VoiceError(RuntimeError):
     def __init__(self, reason_code: str):
@@ -484,6 +486,9 @@ class VoiceBridge:
         except VoiceError as exc:
             await websocket.send_json({"type": "error", "reason_code": exc.reason_code})
             await self._close(websocket, 1003)
+        except InferenceFailure as exc:
+            await websocket.send_json({"type": "error", "reason_code": exc.reason_code})
+            await self._close(websocket, 1011)
         finally:
             if stream is not None:
                 close = getattr(stream, "close", None)
