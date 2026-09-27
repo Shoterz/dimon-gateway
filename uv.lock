@@ -130,6 +130,7 @@ dependencies = [
     { name = "pydantic" },
     { name = "pyjwt", extra = ["crypto"] },
     { name = "python-dotenv" },
+    { name = "pyyaml" },
     { name = "uvicorn", extra = ["standard"] },
     { name = "websockets" },
 ]
@@ -146,6 +147,7 @@ requires-dist = [
     { name = "pydantic", specifier = ">=2.13,<3" },
     { name = "pyjwt", extras = ["crypto"], specifier = ">=2.12,<3" },
     { name = "python-dotenv", specifier = ">=1.1,<2" },
+    { name = "pyyaml", specifier = ">=6,<7" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.46,<0.47" },
     { name = "websockets", specifier = ">=16,<17" },
 ]

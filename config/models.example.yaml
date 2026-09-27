@@ -1,0 +1,32 @@
+manifest_version: 1
+models:
+  qwen:
+    source: https://huggingface.co/mradermacher/Huihui-Qwen3.5-9B-abliterated-GGUF
+    revision: 9f646d7eda193ddf2348134f3bff3d49eed7a2c6
+    license: Apache-2.0
+    artifact: Huihui-Qwen3.5-9B-abliterated.Q5_K_M.gguf
+    path_env: DIMON_QWEN_MODEL_PATH
+    expected_bytes: 6522004864
+    sha256: 946072b16f5d672e60357410f900888f6522b3ae49f241b5bf2142cb89637fb6
+    port: 8080
+    download_url: https://huggingface.co/mradermacher/Huihui-Qwen3.5-9B-abliterated-GGUF/resolve/9f646d7eda193ddf2348134f3bff3d49eed7a2c6/Huihui-Qwen3.5-9B-abliterated.Q5_K_M.gguf
+  nemotron:
+    source: https://huggingface.co/nvidia/nemotron-speech-streaming-en-0.6b
+    revision: ebe59e5a817142986528bbbee5dba8db7b38ed50
+    license: NVIDIA-Open-Model-License
+    artifact: nemotron-speech-streaming-en-0.6b.q8_0.gguf
+    path_env: DIMON_NEMOTRON_MODEL_PATH
+    expected_bytes: 699872960
+    sha256: d9a01898d2a611c8764e23a1c2f45e70bbd5a425dc4de93692ac951dd603812d
+    port: 8004
+    download_url: https://huggingface.co/nvidia/nemotron-speech-streaming-en-0.6b/resolve/ebe59e5a817142986528bbbee5dba8db7b38ed50/nemotron-speech-streaming-en-0.6b.q8_0.gguf
+  kokoro:
+    source: https://huggingface.co/hexgrad/Kokoro-82M
+    revision: f3ff3571791e39611d31c381e3a41a3af07b4987
+    license: Apache-2.0
+    artifact: kokoro-v1_0.pth
+    path_env: DIMON_KOKORO_MODEL_PATH
+    expected_bytes: 327212226
+    sha256: 496dba118d1a58f5f3db2efc88dbdc216e0483fc89fe6e47ee1f2c53f18ad1e4
+    port: 3001
+    download_url: https://huggingface.co/hexgrad/Kokoro-82M/resolve/f3ff3571791e39611d31c381e3a41a3af07b4987/kokoro-v1_0.pth

@@ -33,3 +33,14 @@ files remain authoritative:
 
 Development and transitive dependencies are listed in `uv.lock`. Distribution
 of a release should include any notices required by the exact dependency set.
+# Model artifacts and GPU runtimes
+
+Dimon does not redistribute model weights or compiled GPU runtimes. Optional host-side components are obtained separately under their upstream terms:
+
+- Huihui Qwen3.5 9B abliterated GGUF, Apache-2.0.
+- NVIDIA Nemotron Speech Streaming 0.6B, NVIDIA Open Model License.
+- Kokoro-82M, Apache-2.0.
+- llama.cpp, MIT License.
+- NVIDIA NeMo-Speech.cpp, Apache-2.0, with NVIDIA runtime dependencies subject to their own terms.
+
+Exact artifact sources and immutable revisions are listed in `docs/model-provenance.md`.
