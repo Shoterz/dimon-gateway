@@ -203,12 +203,14 @@ def start_command(args) -> int:
     managed: list[ManagedProcess] = []
     leases = []
     broker = GpuCapacityBroker(NvidiaSmiTelemetry(), safety_reserve_mb=512)
-    if args.mode == "shared":
+    wants_raw = args.components in {"raw", "all"}
+    wants_gateway = args.components in {"gateway", "all"}
+    if args.mode == "shared" and wants_raw:
         unavailable = [name for name in ("qwen", "nemotron", "kokoro") if not probe_tcp("127.0.0.1", SERVICE_PORTS[name])]
         if unavailable:
             print(json.dumps({"status": "not_ready", "reason_code": "SHARED_SERVICE_UNAVAILABLE", "services": unavailable}))
             return 1
-    else:
+    elif args.mode == "standalone" and wants_raw:
         config = HostConfig.load(ROOT / "config" / "gpu-host.example.yaml")
         broker = GpuCapacityBroker(NvidiaSmiTelemetry(), safety_reserve_mb=config.safety_reserve_mb)
         for name in ("qwen", "nemotron", "kokoro"):
@@ -234,20 +236,22 @@ def start_command(args) -> int:
                     started.stop()
                 return 1
             managed.append(process)
-    gateway = _managed(
-        "inference_gateway",
-        lambda: probe_tcp("127.0.0.1", 8891),
-        state_dir,
-        30,
-    )
-    try:
-        gateway.start()
-    except ProcessStateError as error:
-        for process in reversed(managed):
-            process.stop()
-        print(json.dumps({"status": "not_ready", "reason_code": str(error)}))
-        return 1
-    managed.append(gateway)
+    gateway = None
+    if wants_gateway:
+        gateway = _managed(
+            "inference_gateway",
+            lambda: probe_tcp("127.0.0.1", 8891),
+            state_dir,
+            30,
+        )
+        try:
+            gateway.start()
+        except ProcessStateError as error:
+            for process in reversed(managed):
+                process.stop()
+            print(json.dumps({"status": "not_ready", "reason_code": str(error)}))
+            return 1
+        managed.append(gateway)
     stopping = False
 
     def stop(_signum=None, _frame=None):
@@ -257,7 +261,7 @@ def start_command(args) -> int:
     signal.signal(signal.SIGINT, stop)
     signal.signal(signal.SIGTERM, stop)
     try:
-        while not stopping and gateway.ready():
+        while not stopping and managed and all(process.ready() for process in managed):
             time.sleep(1)
     finally:
         for process in reversed(managed):
@@ -297,6 +301,7 @@ def parser() -> argparse.ArgumentParser:
     setup.set_defaults(handler=setup_command)
     start = commands.add_parser("start")
     start.add_argument("--mode", choices=("shared", "standalone"), required=True)
+    start.add_argument("--components", choices=("raw", "gateway", "all"), default="all")
     start.add_argument("--check", action="store_true")
     start.set_defaults(handler=start_command)
     stop = commands.add_parser("stop")
