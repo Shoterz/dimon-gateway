@@ -19,7 +19,8 @@ class GatewayError(Exception):
         Exception.__init__(self, self.message)
 
 
-async def gateway_error_response(_request: Request, exc: GatewayError) -> JSONResponse:
+async def gateway_error_response(request: Request, exc: GatewayError) -> JSONResponse:
+    request.state.outcome_code = exc.code
     return JSONResponse(
         status_code=exc.status_code,
         content={

@@ -7,6 +7,7 @@ import struct
 import unittest
 import wave
 from collections.abc import Awaitable, Callable
+from uuid import UUID
 
 import httpx
 
@@ -122,6 +123,7 @@ class RemoteHttpTests(unittest.TestCase):
         self.assertRegex(payload["request_id"], r"^[0-9a-f-]{36}$")
         self.assertEqual(request.headers["cf-access-client-id"], "client-id")
         self.assertEqual(request.headers["cf-access-client-secret"], "client-secret")
+        self.assertEqual(request.headers["x-dimon-correlation-id"], payload["request_id"])
 
     def test_every_stable_gateway_error_is_preserved_without_its_message(self) -> None:
         for code in STABLE_GATEWAY_ERROR_CODES:
@@ -303,6 +305,7 @@ class RemoteVoiceTests(unittest.TestCase):
         self.assertEqual(json.loads(socket.sent[1]), {"type": "input.commit"})
         self.assertEqual(calls[0][0], "wss://gateway.example.test/v1/transcription")
         self.assertEqual(calls[0][1]["additional_headers"]["CF-Access-Client-Id"], "client-id")
+        UUID(calls[0][1]["additional_headers"]["X-Dimon-Correlation-Id"])
         self.assertLessEqual(calls[0][1]["max_size"], 1_048_576)
         self.assertTrue(connection.exited)
 

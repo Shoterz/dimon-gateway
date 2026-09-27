@@ -80,7 +80,9 @@ class AccessTokenVerifier:
 
 async def require_access_identity(request: Request) -> AccessIdentity:
     peer = request.client.host if request.client is not None else None
-    return request.app.state.access_verifier.verify(
+    identity = request.app.state.access_verifier.verify(
         request.headers.get("cf-access-jwt-assertion"),
         peer,
     )
+    request.state.access_identity = identity
+    return identity

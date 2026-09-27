@@ -72,12 +72,20 @@ class BoundedExecutor:
                 return
             self._active -= 1
 
-    async def run(self, awaitable_factory: Callable[[], Awaitable[T]]) -> T:
+    async def run(
+        self,
+        awaitable_factory: Callable[[], Awaitable[T]],
+        *,
+        on_acquired: Callable[[float], None] | None = None,
+    ) -> T:
         acquired = False
+        queued_at = time.perf_counter()
         try:
             async with asyncio.timeout(self.timeout_seconds):
                 await self._acquire()
                 acquired = True
+                if on_acquired is not None:
+                    on_acquired((time.perf_counter() - queued_at) * 1000)
                 return await awaitable_factory()
         except TimeoutError as exc:
             raise GatewayError(

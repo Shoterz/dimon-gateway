@@ -181,6 +181,10 @@ class VoiceLease:
     def __init__(self):
         self._lock = asyncio.Lock()
 
+    @property
+    def active_count(self) -> int:
+        return int(self._lock.locked())
+
     async def acquire(self) -> bool:
         if self._lock.locked():
             return False

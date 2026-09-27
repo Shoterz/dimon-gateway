@@ -6,8 +6,10 @@ import hashlib
 import json
 import math
 import os
+from collections.abc import Mapping
 
 from fastapi import FastAPI, Request, Response, WebSocket
+from fastapi.responses import JSONResponse
 from pydantic import ValidationError
 
 from apps.dimon_live.model_adapter import validate_intent
@@ -19,6 +21,12 @@ from .contracts import IntentRequest, SpeechRequest
 from .errors import GatewayError, gateway_error_response
 from .idempotency import IdempotencyStore
 from .limits import BoundedExecutor, SlidingWindowLimiter
+from .observability import (
+    GatewayObservability,
+    ReadinessProbe,
+    ReadinessService,
+    default_readiness_probes,
+)
 from .speech import (
     KokoroGatewaySynthesizer,
     SpeechSynthesizer,
@@ -82,6 +90,9 @@ def create_gateway_app(
     speech_synthesizer: SpeechSynthesizer | None = None,
     speech_executor: BoundedExecutor | None = None,
     speech_limiter: SlidingWindowLimiter | None = None,
+    readiness_probes: Mapping[str, ReadinessProbe] | None = None,
+    readiness_timeout: float = 1.0,
+    observability: GatewayObservability | None = None,
 ) -> FastAPI:
     application = FastAPI(
         title="Dimon Inference Gateway",
@@ -107,7 +118,65 @@ def create_gateway_app(
     )
     application.state.speech_executor = speech_executor or BoundedExecutor(1, 4, 30)
     application.state.speech_limiter = speech_limiter or SlidingWindowLimiter(20, 60)
+    application.state.observability = observability or GatewayObservability()
+    application.state.readiness = ReadinessService(
+        readiness_probes or default_readiness_probes(config),
+        {
+            "intent": config.qwen_revision,
+            "transcription": config.nemotron_revision,
+            "speech": config.kokoro_revision,
+        },
+        timeout=readiness_timeout,
+    )
     application.add_exception_handler(GatewayError, gateway_error_response)
+
+    @application.middleware("http")
+    async def observe_request(request: Request, call_next):
+        observed = application.state.observability
+        started = observed.clock()
+        request.state.correlation_id = observed.correlation_id(
+            request.headers.get("x-dimon-correlation-id")
+        )
+        request.state.outcome_code = "OK"
+        request.state.queue_delay_ms = 0.0
+        try:
+            response = await call_next(request)
+        except BaseException:
+            request.state.outcome_code = "INTERNAL_ERROR"
+            observed.record_http(
+                request,
+                outcome_code=request.state.outcome_code,
+                latency_ms=(observed.clock() - started) * 1000,
+            )
+            raise
+        response.headers["X-Dimon-Correlation-Id"] = request.state.correlation_id
+        if response.status_code >= 400 and request.state.outcome_code == "OK":
+            request.state.outcome_code = "HTTP_ERROR"
+        observed.record_http(
+            request,
+            outcome_code=request.state.outcome_code,
+            latency_ms=(observed.clock() - started) * 1000,
+        )
+        return response
+
+    @application.get("/health/live")
+    async def health_live(request: Request):
+        await require_access_identity(request)
+        return {"status": "live"}
+
+    @application.get("/health/ready")
+    async def health_ready(request: Request):
+        await require_access_identity(request)
+        ready, capabilities = await application.state.readiness.check()
+        if not ready:
+            request.state.outcome_code = "NOT_READY"
+        return JSONResponse(
+            status_code=200 if ready else 503,
+            content={
+                "status": "ready" if ready else "not_ready",
+                "capabilities": capabilities,
+            },
+        )
 
     @application.post("/v1/intent")
     async def create_intent(request: Request):
@@ -174,7 +243,12 @@ def create_gateway_app(
             }
 
         try:
-            response = await application.state.intent_executor.run(invoke)
+            response = await application.state.intent_executor.run(
+                invoke,
+                on_acquired=lambda value: setattr(
+                    request.state, "queue_delay_ms", value
+                ),
+            )
         except BaseException as exc:
             if isinstance(exc, GatewayError) and exc.request_id is None:
                 exc.request_id = request_id
@@ -185,7 +259,24 @@ def create_gateway_app(
 
     @application.websocket("/v1/transcription")
     async def transcription(websocket: WebSocket):
-        await application.state.transcription_gateway.handle(websocket)
+        observed = application.state.observability
+        started = observed.clock()
+        correlation_id = observed.correlation_id(
+            websocket.headers.get("x-dimon-correlation-id")
+        )
+        setattr(websocket, "_dimon_correlation_id", correlation_id)
+        setattr(websocket, "_dimon_outcome_code", "INTERNAL_ERROR")
+        try:
+            await application.state.transcription_gateway.handle(websocket)
+        finally:
+            observed.record_websocket(
+                correlation_id=correlation_id,
+                identity=getattr(websocket, "_dimon_identity", None),
+                outcome_code=getattr(
+                    websocket, "_dimon_outcome_code", "INTERNAL_ERROR"
+                ),
+                latency_ms=(observed.clock() - started) * 1000,
+            )
 
     @application.post("/v1/speech")
     async def create_speech(request: Request):
@@ -234,7 +325,12 @@ def create_gateway_app(
                 ) from exc
 
         try:
-            result = await application.state.speech_executor.run(invoke)
+            result = await application.state.speech_executor.run(
+                invoke,
+                on_acquired=lambda value: setattr(
+                    request.state, "queue_delay_ms", value
+                ),
+            )
         except GatewayError as exc:
             if exc.request_id is None:
                 exc.request_id = request_id

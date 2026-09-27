@@ -110,13 +110,18 @@ class TranscriptionGateway:
                 peer,
             )
         except GatewayError as exc:
+            setattr(websocket, "_dimon_outcome_code", exc.code)
             await websocket.close(code=4401 if exc.status_code == 401 else 4403)
             return
 
+        setattr(websocket, "_dimon_identity", identity)
+
         if self.limiter.check(identity.subject) is not None:
+            setattr(websocket, "_dimon_outcome_code", "RATE_LIMITED")
             await websocket.close(code=4429)
             return
         if not await self.lease.acquire():
+            setattr(websocket, "_dimon_outcome_code", "VOICE_BUSY")
             await websocket.accept()
             await self._send_error(websocket, "VOICE_BUSY")
             await websocket.close(code=1013)
@@ -208,10 +213,13 @@ class TranscriptionGateway:
                     503,
                 )
             await websocket.send_json(self._event("transcript.final", text=transcript))
+            setattr(websocket, "_dimon_outcome_code", "OK")
             await websocket.close(code=1000)
         except WebSocketDisconnect:
             disconnected = True
+            setattr(websocket, "_dimon_outcome_code", "CLIENT_DISCONNECTED")
         except GatewayError as exc:
+            setattr(websocket, "_dimon_outcome_code", exc.code)
             await self._send_error(websocket, exc.code)
             await websocket.close(code=1003 if exc.status_code < 500 else 1011)
         except InferenceFailure as exc:
@@ -219,9 +227,11 @@ class TranscriptionGateway:
                 "UPSTREAM_TIMEOUT",
                 "UPSTREAM_UNAVAILABLE",
             } else "UPSTREAM_UNAVAILABLE"
+            setattr(websocket, "_dimon_outcome_code", code)
             await self._send_error(websocket, code)
             await websocket.close(code=1011)
         except Exception:
+            setattr(websocket, "_dimon_outcome_code", "UPSTREAM_UNAVAILABLE")
             await self._send_error(websocket, "UPSTREAM_UNAVAILABLE")
             await websocket.close(code=1011)
         finally:

@@ -28,6 +28,7 @@ def valid_env() -> dict[str, str]:
         "DIMON_QWEN_API_BASE": "http://127.0.0.1:8080/v1",
         "DIMON_QWEN_REVISION": "test-revision",
         "DIMON_NEMOTRON_URL": "ws://127.0.0.1:8004/v1/realtime",
+        "DIMON_NEMOTRON_REVISION": "test-nemotron-revision",
         "DIMON_KOKORO_URL": "http://127.0.0.1:3001",
         "DIMON_KOKORO_REVISION": "test-kokoro-revision",
     }
@@ -66,6 +67,7 @@ class GatewayConfigTests(unittest.TestCase):
             "DIMON_CF_ACCESS_AUDIENCE",
             "DIMON_CF_ACCESS_ISSUER",
             "DIMON_QWEN_REVISION",
+            "DIMON_NEMOTRON_REVISION",
         ):
             with self.subTest(key=key):
                 env = valid_env()
@@ -98,6 +100,19 @@ class GatewayConfigTests(unittest.TestCase):
                 env[key] = value
                 with self.assertRaises(ValueError):
                     GatewayConfig.from_env(env)
+
+    def test_public_revision_identifiers_cannot_contain_paths_or_controls(self) -> None:
+        for key in (
+            "DIMON_QWEN_REVISION",
+            "DIMON_NEMOTRON_REVISION",
+            "DIMON_KOKORO_REVISION",
+        ):
+            for value in ("nested/model/path", "revision with spaces", "r1\r\nX:evil"):
+                with self.subTest(key=key, value=value):
+                    env = valid_env()
+                    env[key] = value
+                    with self.assertRaisesRegex(ValueError, key):
+                        GatewayConfig.from_env(env)
 
 
 class AccessTokenVerifierTests(unittest.TestCase):

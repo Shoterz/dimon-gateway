@@ -13,7 +13,7 @@ from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlparse, urlunparse
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import httpx
 
@@ -119,12 +119,13 @@ class RemoteGatewayClient:
         }
 
     def post_intent(self, payload: Mapping[str, object]) -> dict[str, Any]:
+        headers = self._request_headers(payload)
         try:
             with self.sync_client.stream(
                 "POST",
                 f"{self.config.base_url}/v1/intent",
                 json=payload,
-                headers=self.access_headers,
+                headers=headers,
                 timeout=self.config.timeout,
             ) as streamed:
                 response = self._read_sync(streamed, self.config.max_response_bytes)
@@ -142,12 +143,13 @@ class RemoteGatewayClient:
         return body
 
     async def post_speech(self, payload: Mapping[str, object]) -> httpx.Response:
+        headers = self._request_headers(payload)
         try:
             async with self.async_client.stream(
                 "POST",
                 f"{self.config.base_url}/v1/speech",
                 json=payload,
-                headers=self.access_headers,
+                headers=headers,
                 timeout=self.config.timeout,
             ) as streamed:
                 response = await self._read_async(streamed, self.config.max_wav_bytes)
@@ -166,7 +168,10 @@ class RemoteGatewayClient:
             connector = connect
         return connector(
             self.config.websocket_url,
-            additional_headers=self.access_headers,
+            additional_headers={
+                **self.access_headers,
+                "X-Dimon-Correlation-Id": str(uuid4()),
+            },
             open_timeout=self.config.timeout,
             close_timeout=0.5,
             ping_interval=None,
@@ -174,6 +179,17 @@ class RemoteGatewayClient:
             max_queue=8,
             proxy=None,
         )
+
+    def _request_headers(self, payload: Mapping[str, object]) -> dict[str, str]:
+        proposed = payload.get("request_id")
+        try:
+            correlation_id = str(UUID(str(proposed)))
+        except (ValueError, TypeError, AttributeError):
+            correlation_id = str(uuid4())
+        return {
+            **self.access_headers,
+            "X-Dimon-Correlation-Id": correlation_id,
+        }
 
     @staticmethod
     def _bounded_response(response: httpx.Response, data: bytes) -> httpx.Response:

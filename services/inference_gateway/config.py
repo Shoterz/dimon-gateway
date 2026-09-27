@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ipaddress
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from ipaddress import IPv4Address, IPv6Address
@@ -10,6 +11,7 @@ from urllib.parse import urlparse
 
 
 IPAddress = IPv4Address | IPv6Address
+_REVISION = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:+@-]{0,127}$")
 
 
 def _required(env: Mapping[str, str], key: str) -> str:
@@ -42,6 +44,13 @@ def _loopback_url(value: str, label: str, schemes: set[str]) -> str:
     return value.rstrip("/")
 
 
+def _revision(env: Mapping[str, str], key: str) -> str:
+    value = _required(env, key)
+    if _REVISION.fullmatch(value) is None:
+        raise ValueError(f"{key} is not a safe revision identifier")
+    return value
+
+
 @dataclass(frozen=True)
 class GatewayConfig:
     bind_host: str
@@ -57,6 +66,7 @@ class GatewayConfig:
     qwen_revision: str
     max_raw_output_bytes: int
     nemotron_url: str
+    nemotron_revision: str
     kokoro_url: str
     kokoro_revision: str
 
@@ -111,7 +121,7 @@ class GatewayConfig:
         qwen_model = env.get("DIMON_QWEN_MODEL", "qwen35-9b-abliterated-q5").strip()
         if not qwen_model:
             raise ValueError("DIMON_QWEN_MODEL is required")
-        qwen_revision = _required(env, "DIMON_QWEN_REVISION")
+        qwen_revision = _revision(env, "DIMON_QWEN_REVISION")
         try:
             max_raw_output_bytes = int(
                 env.get("DIMON_GATEWAY_MAX_RAW_OUTPUT_BYTES", "8192")
@@ -125,14 +135,13 @@ class GatewayConfig:
             "DIMON_NEMOTRON_URL",
             {"ws", "wss"},
         )
+        nemotron_revision = _revision(env, "DIMON_NEMOTRON_REVISION")
         kokoro = _loopback_url(
             env.get("DIMON_KOKORO_URL", "http://127.0.0.1:3001").strip(),
             "DIMON_KOKORO_URL",
             {"http", "https"},
         )
-        kokoro_revision = _required(env, "DIMON_KOKORO_REVISION")
-        if any(ord(character) < 33 or ord(character) > 126 for character in kokoro_revision):
-            raise ValueError("DIMON_KOKORO_REVISION contains unsafe characters")
+        kokoro_revision = _revision(env, "DIMON_KOKORO_REVISION")
         return cls(
             bind_host=bind_host,
             bind_port=bind_port,
@@ -147,6 +156,7 @@ class GatewayConfig:
             qwen_revision=qwen_revision,
             max_raw_output_bytes=max_raw_output_bytes,
             nemotron_url=nemotron,
+            nemotron_revision=nemotron_revision,
             kokoro_url=kokoro,
             kokoro_revision=kokoro_revision,
         )
