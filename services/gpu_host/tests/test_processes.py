@@ -3,9 +3,10 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from services.gpu_host.capacity import CapacityProfile, GpuCapacityBroker
-from services.gpu_host.processes import ManagedProcess, ProcessStateError
+from services.gpu_host.processes import ManagedProcess, ProcessStateError, SubprocessAdapter
 from services.gpu_host.supervisor import HostSupervisor
 
 
@@ -39,6 +40,21 @@ class FakeAdapter:
 
 
 class ManagedProcessTests(unittest.TestCase):
+    def test_process_identity_survives_launcher_exec(self) -> None:
+        stat = "123 (launcher) S " + " ".join(["0"] * 18 + ["456"] + ["0"] * 8)
+        with patch(
+            "services.gpu_host.processes.Path.read_text",
+            side_effect=[stat, "boot-id\n"],
+        ):
+            before_exec = SubprocessAdapter().identity(123)
+        stat_after = stat.replace("(launcher)", "(python)")
+        with patch(
+            "services.gpu_host.processes.Path.read_text",
+            side_effect=[stat_after, "boot-id\n"],
+        ):
+            after_exec = SubprocessAdapter().identity(123)
+        self.assertEqual(before_exec, after_exec)
+
     def test_start_ready_and_stop_only_recorded_identity(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             adapter = FakeAdapter()

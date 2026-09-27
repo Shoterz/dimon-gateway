@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import io
+import wave
 from dataclasses import dataclass
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -41,7 +42,6 @@ class KokoroEngine:
 
     def synthesize(self, text: str) -> bytes:
         import numpy as np
-        import soundfile as sf
 
         segments = []
         for result in self.pipeline(text, voice="af_heart", speed=1.15):
@@ -49,9 +49,14 @@ class KokoroEngine:
                 segments.append(result.audio.detach().cpu().numpy())
         if not segments:
             raise RuntimeError("KOKORO_EMPTY_OUTPUT")
-        audio = np.concatenate(segments)
+        audio = np.clip(np.concatenate(segments), -1.0, 1.0)
+        pcm16 = (audio * 32767).astype("<i2", copy=False).tobytes()
         output = io.BytesIO()
-        sf.write(output, audio, 24_000, format="WAV", subtype="PCM_16")
+        with wave.open(output, "wb") as wav:
+            wav.setnchannels(1)
+            wav.setsampwidth(2)
+            wav.setframerate(24_000)
+            wav.writeframes(pcm16)
         return output.getvalue()
 
 

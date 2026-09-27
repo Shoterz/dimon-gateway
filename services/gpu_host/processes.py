@@ -43,11 +43,13 @@ class SubprocessAdapter:
     def identity(self, pid: int) -> str | None:
         try:
             stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
-            command = Path(f"/proc/{pid}/cmdline").read_bytes()
+            boot_id = Path("/proc/sys/kernel/random/boot_id").read_text(
+                encoding="ascii"
+            ).strip()
         except OSError:
             return None
         start_ticks = stat.rsplit(")", 1)[1].split()[19]
-        return hashlib.sha256(start_ticks.encode() + b"\0" + command).hexdigest()
+        return hashlib.sha256(f"{boot_id}:{start_ticks}".encode()).hexdigest()
 
     def is_alive(self, pid: int) -> bool:
         try:

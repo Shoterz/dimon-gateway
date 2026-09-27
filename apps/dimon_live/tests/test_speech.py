@@ -104,6 +104,42 @@ class SpeechTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 asyncio.run(KokoroSynthesizer("http://kokoro.test")("Safe result."))
 
+    def test_kokoro_client_supports_bounded_gradio_shared_service(self):
+        paths = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            paths.append(request.url.path)
+            if request.url.path == "/v1/speech":
+                return httpx.Response(404)
+            if request.method == "POST":
+                return httpx.Response(200, json={"event_id": "event-1"})
+            if request.url.path.endswith("/event-1"):
+                return httpx.Response(
+                    200,
+                    headers={"content-type": "text/event-stream"},
+                    text='event: complete\ndata: [{"url":"http://kokoro.test/gradio_a/gradio_api/file=out.wav"}]\n\n',
+                )
+            return httpx.Response(200, content=WAV)
+
+        def client_factory(**kwargs):
+            return REAL_ASYNC_CLIENT(
+                base_url=kwargs["base_url"], transport=httpx.MockTransport(handler)
+            )
+
+        with patch("apps.dimon_live.speech.httpx.AsyncClient", side_effect=client_factory):
+            audio = asyncio.run(KokoroSynthesizer("http://kokoro.test")("Safe result."))
+
+        self.assertEqual(audio, WAV)
+        self.assertEqual(
+            paths,
+            [
+                "/v1/speech",
+                "/gradio_api/call/KOKORO_TTS_API",
+                "/gradio_api/call/KOKORO_TTS_API/event-1",
+                "/gradio_api/file=out.wav",
+            ],
+        )
+
     def test_non_committed_result_is_not_sent_to_kokoro(self):
         called = []
 

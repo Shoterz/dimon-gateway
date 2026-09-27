@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import secrets
 import time
 import asyncio
@@ -9,7 +10,7 @@ import copy
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Awaitable, Callable
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse, urlsplit, urlunsplit
 
 import httpx
 
@@ -76,10 +77,53 @@ class KokoroSynthesizer:
                 "/v1/speech",
                 json={"text": text},
             )
+            if response.status_code == 404:
+                return await self._gradio_compat(client, text)
             response.raise_for_status()
             if response.headers.get("content-type", "").split(";", 1)[0] != "audio/wav":
                 raise RuntimeError("Kokoro returned an invalid media type")
             return response.content
+
+    async def _gradio_compat(self, client: httpx.AsyncClient, text: str) -> bytes:
+        response = await client.post(
+            "/gradio_api/call/KOKORO_TTS_API",
+            json={"data": [text, "American English", "af_heart", 1.15, False, False, "WAV", 300, 150]},
+        )
+        response.raise_for_status()
+        event_id = response.json().get("event_id")
+        if not isinstance(event_id, str):
+            raise RuntimeError("Kokoro did not return an event ID")
+        audio_url = None
+        async with client.stream(
+            "GET", f"/gradio_api/call/KOKORO_TTS_API/{event_id}"
+        ) as stream:
+            stream.raise_for_status()
+            event_type = ""
+            async for line in stream.aiter_lines():
+                if line.startswith("event:"):
+                    event_type = line[6:].strip()
+                elif line.startswith("data:") and event_type == "complete":
+                    payload = json.loads(line[5:].strip())
+                    if isinstance(payload, list) and payload and isinstance(payload[0], dict):
+                        audio_url = payload[0].get("url")
+                        break
+                elif line.startswith("data:") and event_type == "error":
+                    raise RuntimeError("Kokoro synthesis failed")
+        if not isinstance(audio_url, str):
+            raise RuntimeError("Kokoro queue ended without audio")
+        resolved = urljoin(self.base_url + "/", audio_url)
+        if urlparse(resolved).netloc != urlparse(self.base_url).netloc:
+            raise RuntimeError("Kokoro returned an untrusted audio URL")
+        parsed = urlsplit(resolved)
+        route = "/gradio_api/file="
+        offset = parsed.path.find(route)
+        if offset > 0:
+            resolved = urlunsplit(
+                (parsed.scheme, parsed.netloc, parsed.path[offset:], parsed.query, parsed.fragment)
+            )
+        audio = await client.get(resolved)
+        audio.raise_for_status()
+        return audio.content
 
     async def synthesize_result(self, result: dict) -> bytes:
         text = result_summary(result)

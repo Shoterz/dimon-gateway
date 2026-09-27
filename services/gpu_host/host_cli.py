@@ -71,16 +71,21 @@ def listener_scope(port: int) -> str:
 
 def probe_service(name: str, timeout: float = 1) -> bool:
     port = SERVICE_PORTS[name]
-    path = "/health/live" if name == "gateway" else "/health"
-    try:
-        connection = http.client.HTTPConnection("127.0.0.1", port, timeout=timeout)
-        connection.request("GET", path)
-        response = connection.getresponse()
-        response.read(4097)
-        connection.close()
-        return response.status == 200 or (name == "gateway" and response.status == 401)
-    except OSError:
-        return False
+    paths = ("/health", "/") if name == "kokoro" else (
+        ("/health/live",) if name == "gateway" else ("/health",)
+    )
+    for path in paths:
+        try:
+            connection = http.client.HTTPConnection("127.0.0.1", port, timeout=timeout)
+            connection.request("GET", path)
+            response = connection.getresponse()
+            response.read(4097)
+            connection.close()
+            if response.status == 200 or (name == "gateway" and response.status == 401):
+                return True
+        except OSError:
+            return False
+    return False
 
 
 def gpu_free_mb() -> int:
