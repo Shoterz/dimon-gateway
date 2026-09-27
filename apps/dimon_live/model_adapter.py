@@ -45,6 +45,7 @@ class ExtractedIntent:
     intent: dict[str, Any]
     raw_output: str
     latency_ms: float
+    fixture_case_id: str | None = None
 
 
 class Extractor(Protocol):

@@ -157,12 +157,13 @@ class ActionService:
             )
 
         intent = extracted.intent
-        trace.append(
-            {
-                "stage": "MODEL_RESPONSE_RECEIVED",
-                "latency_ms": extracted.latency_ms,
-            }
-        )
+        model_trace = {
+            "stage": "MODEL_RESPONSE_RECEIVED",
+            "latency_ms": extracted.latency_ms,
+        }
+        if extracted.fixture_case_id is not None:
+            model_trace["fixture_case_id"] = extracted.fixture_case_id
+        trace.append(model_trace)
         trace.append({"stage": "INTENT_VALIDATED"})
 
         recovered_batch = self._recover_exact_saved_batch(text, intent)

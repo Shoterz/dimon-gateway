@@ -1,0 +1,12 @@
+{
+  "contract_version": 3,
+  "kind": "BENEFICIARY_TRANSFER",
+  "source_account_ref": "savings",
+  "source_evidence": "savings",
+  "recipient_label": "John Smith",
+  "recipient_evidence": "John Smith",
+  "currency": "SGD",
+  "payment_reference": null,
+  "reference_evidence": null,
+  "requested_execution_date": null
+}

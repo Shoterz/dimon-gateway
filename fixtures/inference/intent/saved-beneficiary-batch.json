@@ -1,0 +1,18 @@
+{
+  "contract_version": 4,
+  "kind": "BENEFICIARY_TRANSFER_BATCH",
+  "source_account_ref": null,
+  "source_evidence": null,
+  "items": [
+    {
+      "recipient_label": "John Smith",
+      "recipient_evidence": "John Smith"
+    },
+    {
+      "recipient_label": "Alicia Powell",
+      "recipient_evidence": "Alicia Powell"
+    }
+  ],
+  "currency": "SGD",
+  "requested_execution_date": null
+}

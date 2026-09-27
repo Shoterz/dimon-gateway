@@ -1,0 +1,12 @@
+{
+  "contract_version": 3,
+  "kind": "PAYNOW_MOBILE_TRANSFER",
+  "source_account_ref": null,
+  "source_evidence": null,
+  "mobile_proxy": "86952933",
+  "proxy_evidence": "8695 2933",
+  "currency": "SGD",
+  "payment_reference": "flowers",
+  "reference_evidence": "for flowers",
+  "requested_execution_date": null
+}

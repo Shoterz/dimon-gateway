@@ -1,0 +1,12 @@
+{
+  "contract_version": 3,
+  "kind": "BENEFICIARY_TRANSFER",
+  "source_account_ref": null,
+  "source_evidence": null,
+  "recipient_label": "John",
+  "recipient_evidence": "John",
+  "currency": "SGD",
+  "payment_reference": null,
+  "reference_evidence": null,
+  "requested_execution_date": null
+}
