@@ -44,6 +44,30 @@ def probe_tcp(host: str, port: int, timeout: float = 1) -> bool:
         return False
 
 
+def listener_scope(port: int) -> str:
+    """Return absent, loopback, or public without exposing socket metadata."""
+    found = False
+    for proc_file, loopback_hex in (
+        (Path("/proc/net/tcp"), "0100007F"),
+        (Path("/proc/net/tcp6"), "00000000000000000000000001000000"),
+    ):
+        try:
+            lines = proc_file.read_text(encoding="ascii").splitlines()[1:]
+        except OSError:
+            continue
+        for line in lines:
+            fields = line.split()
+            if len(fields) < 4 or fields[3] != "0A":
+                continue
+            address, port_hex = fields[1].rsplit(":", 1)
+            if int(port_hex, 16) != port:
+                continue
+            found = True
+            if address not in {loopback_hex}:
+                return "public"
+    return "loopback" if found else "absent"
+
+
 def gpu_free_mb() -> int:
     return NvidiaSmiTelemetry().free_vram_mb()
 
@@ -73,10 +97,13 @@ def collect_health(env: Mapping[str, str] | None = None) -> dict:
         agreement = False
     services = {}
     for name, port in SERVICE_PORTS.items():
-        ready = probe_tcp("127.0.0.1", port)
+        scope = listener_scope(port)
+        ready = probe_tcp("127.0.0.1", port) and scope != "public"
         item: dict[str, str | bool] = {
             "ready": ready,
-            "reason_code": "READY" if ready else "UNREACHABLE",
+            "reason_code": (
+                "READY" if ready else "PUBLIC_BIND" if scope == "public" else "UNREACHABLE"
+            ),
         }
         if name in revisions:
             item["revision"] = revisions[name]
@@ -113,7 +140,10 @@ def _check_runtime_inputs(mode: str) -> list[str]:
         failures.append("INVALID_MANIFEST")
     if mode == "shared":
         for name in ("qwen", "nemotron", "kokoro"):
-            if not probe_tcp("127.0.0.1", SERVICE_PORTS[name]):
+            scope = listener_scope(SERVICE_PORTS[name])
+            if scope == "public":
+                failures.append(f"{name.upper()}_PUBLIC_BIND")
+            elif not probe_tcp("127.0.0.1", SERVICE_PORTS[name]):
                 failures.append(f"{name.upper()}_UNREACHABLE")
     else:
         for name in ("qwen", "nemotron", "kokoro"):
@@ -206,11 +236,24 @@ def start_command(args) -> int:
     wants_raw = args.components in {"raw", "all"}
     wants_gateway = args.components in {"gateway", "all"}
     if args.mode == "shared" and wants_raw:
-        unavailable = [name for name in ("qwen", "nemotron", "kokoro") if not probe_tcp("127.0.0.1", SERVICE_PORTS[name])]
+        unavailable = [
+            name
+            for name in ("qwen", "nemotron", "kokoro")
+            if listener_scope(SERVICE_PORTS[name]) != "loopback"
+            or not probe_tcp("127.0.0.1", SERVICE_PORTS[name])
+        ]
         if unavailable:
-            print(json.dumps({"status": "not_ready", "reason_code": "SHARED_SERVICE_UNAVAILABLE", "services": unavailable}))
+            print(json.dumps({"status": "not_ready", "reason_code": "SHARED_BOUNDARY_INVALID", "services": unavailable}))
             return 1
     elif args.mode == "standalone" and wants_raw:
+        occupied = [
+            name
+            for name in ("qwen", "nemotron", "kokoro")
+            if listener_scope(SERVICE_PORTS[name]) != "absent"
+        ]
+        if occupied:
+            print(json.dumps({"status": "not_ready", "reason_code": "PROJECT_PORT_OCCUPIED", "services": occupied}))
+            return 1
         config = HostConfig.load(ROOT / "config" / "gpu-host.example.yaml")
         broker = GpuCapacityBroker(NvidiaSmiTelemetry(), safety_reserve_mb=config.safety_reserve_mb)
         for name in ("qwen", "nemotron", "kokoro"):

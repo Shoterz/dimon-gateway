@@ -100,6 +100,26 @@ class ManagedProcessTests(unittest.TestCase):
                 process.start()
             self.assertEqual(adapter.pid, 4001)
 
+    def test_failed_upstream_can_restart_after_backoff(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            adapter = FakeAdapter()
+            ready = {"value": False}
+            process = ManagedProcess(
+                name="qwen",
+                command=("services/qwen/run.sh",),
+                state_dir=Path(temp),
+                readiness=lambda: ready["value"],
+                adapter=adapter,
+                startup_timeout_seconds=0,
+                backoff_seconds=0,
+            )
+            with self.assertRaises(ProcessStateError):
+                process.start()
+            ready["value"] = True
+            restarted_pid = process.start()
+            self.assertEqual(restarted_pid, 4002)
+            self.assertTrue(process.ready())
+
     def test_supervisor_acquires_capacity_and_returns_typed_readiness(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             adapter = FakeAdapter()

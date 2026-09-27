@@ -6,9 +6,10 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
-from services.gpu_host.host_cli import collect_health, runtime_directory
+from services.gpu_host.host_cli import collect_health, runtime_directory, start_command
 
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -54,6 +55,9 @@ class HostScriptTests(unittest.TestCase):
             "services.gpu_host.host_cli.probe_tcp",
             side_effect=lambda host, port, timeout=1: port in {8080, 8004, 3001},
         ), patch(
+            "services.gpu_host.host_cli.listener_scope",
+            side_effect=lambda port: "loopback" if port in {8080, 8004, 3001} else "absent",
+        ), patch(
             "services.gpu_host.host_cli.gpu_free_mb", return_value=4096
         ):
             report = collect_health(env)
@@ -62,6 +66,33 @@ class HostScriptTests(unittest.TestCase):
         self.assertEqual(report["services"]["gateway"]["reason_code"], "UNREACHABLE")
         self.assertTrue(report["revision_agreement"])
         self.assertNotIn("path", encoded.lower())
+
+    def test_start_refuses_public_shared_bind_and_occupied_standalone_ports(self) -> None:
+        with tempfile.TemporaryDirectory() as temp, patch(
+            "services.gpu_host.host_cli._load_local_environment"
+        ), patch(
+            "services.gpu_host.host_cli.runtime_directory", return_value=Path(temp)
+        ), patch(
+            "services.gpu_host.host_cli.probe_tcp", return_value=True
+        ), patch(
+            "services.gpu_host.host_cli.listener_scope",
+            side_effect=lambda port: "public" if port == 3001 else "loopback",
+        ):
+            shared = start_command(
+                SimpleNamespace(mode="shared", components="raw", check=False)
+            )
+        with tempfile.TemporaryDirectory() as temp, patch(
+            "services.gpu_host.host_cli._load_local_environment"
+        ), patch(
+            "services.gpu_host.host_cli.runtime_directory", return_value=Path(temp)
+        ), patch(
+            "services.gpu_host.host_cli.listener_scope", return_value="loopback"
+        ):
+            standalone = start_command(
+                SimpleNamespace(mode="standalone", components="raw", check=False)
+            )
+        self.assertEqual(shared, 1)
+        self.assertEqual(standalone, 1)
 
 
 if __name__ == "__main__":
