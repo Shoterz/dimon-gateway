@@ -21,6 +21,13 @@ from .fixture_inference import (
 )
 from .model_adapter import QwenTransferExtractor
 from .speech import KokoroSynthesizer
+from .remote_inference import (
+    RemoteExtractor,
+    RemoteGatewayClient,
+    RemoteGatewayConfig,
+    RemoteRecognizer,
+    RemoteSynthesizer,
+)
 from .voice import NemotronClient, NemotronLifecycleClient
 
 
@@ -79,9 +86,19 @@ def build_inference_providers(
             ),
         )
     if selected_mode == "remote":
-        raise ProviderConfigurationError(
-            "REMOTE_PROVIDER_UNAVAILABLE",
-            "remote providers require the inference gateway client",
+        try:
+            remote_client = RemoteGatewayClient(RemoteGatewayConfig.from_env(env))
+        except (TypeError, ValueError) as exc:
+            raise ProviderConfigurationError(
+                "INVALID_REMOTE_INFERENCE_CONFIG",
+                "remote inference settings are invalid",
+            ) from exc
+        return InferenceProviders(
+            mode="remote",
+            extractor=RemoteExtractor(remote_client),
+            recognizer=RemoteRecognizer(remote_client),
+            voice_lifecycle=None,
+            synthesizer=RemoteSynthesizer(remote_client),
         )
 
     try:

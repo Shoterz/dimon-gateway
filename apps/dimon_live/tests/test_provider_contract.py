@@ -8,6 +8,8 @@ import unittest
 import wave
 from collections.abc import Awaitable, Callable
 
+import httpx
+
 from apps.dimon_live.inference import InferenceProviders
 from apps.dimon_live.model_adapter import (
     ExtractedIntent,
@@ -15,11 +17,28 @@ from apps.dimon_live.model_adapter import (
     InvalidModelOutput,
 )
 from apps.dimon_live.provider_factory import build_inference_providers
+from apps.dimon_live.remote_inference import (
+    RemoteExtractor,
+    RemoteGatewayClient,
+    RemoteGatewayConfig,
+    RemoteRecognizer,
+    RemoteSynthesizer,
+)
+from apps.dimon_live.tests.test_remote_inference import FakeConnection, FakeWebSocket, wav_bytes
 
 
 EXACT_PROMPT = "Send John Smith S$50 from savings."
 MALFORMED_PROMPT = "Fixture: return malformed model output."
 TIMEOUT_PROMPT = "Fixture: simulate Qwen timeout."
+COMMITTED_RESULT = {
+    "outcome": "EXECUTED_SYNTHETIC_TRANSFER",
+    "amount_minor": 5000,
+    "currency": "SGD",
+    "resolved_action": {
+        "kind": "BENEFICIARY_TRANSFER",
+        "recipient_display_name": "John Smith",
+    },
+}
 
 
 class ProviderContractMixin:
@@ -57,7 +76,9 @@ class ProviderContractMixin:
         self.assertEqual(events[-1], f"final:{EXACT_PROMPT}")
 
     def test_speech_returns_a_valid_bounded_wav(self) -> None:
-        audio = asyncio.run(self.make_providers().synthesizer("result"))
+        audio = asyncio.run(
+            self.make_providers().synthesizer.synthesize_result(COMMITTED_RESULT)
+        )
 
         self.assertLessEqual(len(audio), 8 * 1_048_576)
         with wave.open(io.BytesIO(audio), "rb") as wav:
@@ -79,11 +100,18 @@ class ProviderContractMixin:
         voice = self.make_providers("voice-unavailable")
         speech = self.make_providers("speech-unavailable")
 
+        async def voice_failure() -> None:
+            if voice.voice_lifecycle is not None:
+                await voice.voice_lifecycle.acquire()
+                return
+            stream = await voice.recognizer.open_stream(lambda _text: asyncio.sleep(0))
+            await stream.finish()
+
         with self.assertRaises(InferenceFailure) as voice_error:
-            asyncio.run(voice.voice_lifecycle.acquire())
+            asyncio.run(voice_failure())
         self.assertEqual(voice_error.exception.reason_code, "UPSTREAM_UNAVAILABLE")
         with self.assertRaises(InferenceFailure) as speech_error:
-            asyncio.run(speech.synthesizer("result"))
+            asyncio.run(speech.synthesizer.synthesize_result(COMMITTED_RESULT))
         self.assertEqual(speech_error.exception.reason_code, "UPSTREAM_UNAVAILABLE")
 
     def test_closed_voice_stream_rejects_late_audio(self) -> None:
@@ -196,6 +224,15 @@ class LocalFakeSynthesizer:
             wav.writeframes(struct.pack("<h", 0) * 160)
         return output.getvalue()
 
+    async def synthesize_result(self, result: dict) -> bytes:
+        self.assert_committed_result(result)
+        return await self("result")
+
+    @staticmethod
+    def assert_committed_result(result: dict) -> None:
+        if result.get("outcome") != "EXECUTED_SYNTHETIC_TRANSFER":
+            raise AssertionError("expected a committed result")
+
 
 class LocalFakeProviderContractTests(ProviderContractMixin, unittest.TestCase):
     expected_mode = "local"
@@ -207,6 +244,135 @@ class LocalFakeProviderContractTests(ProviderContractMixin, unittest.TestCase):
             recognizer=LocalFakeRecognizer(),
             voice_lifecycle=LocalFakeLifecycle(scenario == "voice-unavailable"),
             synthesizer=LocalFakeSynthesizer(scenario == "speech-unavailable"),
+        )
+
+
+class RemoteProviderContractTests(ProviderContractMixin, unittest.TestCase):
+    expected_mode = "remote"
+
+    def make_providers(self, scenario: str = "normal") -> InferenceProviders:
+        remote_config = RemoteGatewayConfig.from_env(
+            {
+                "DIMON_INFERENCE_GATEWAY_URL": "https://gateway.example.test",
+                "DIMON_CF_ACCESS_CLIENT_ID": "client-id",
+                "DIMON_CF_ACCESS_CLIENT_SECRET": "client-secret",
+            }
+        )
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path == "/v1/intent":
+                payload = json.loads(request.content)
+                if payload["text"] == MALFORMED_PROMPT:
+                    return httpx.Response(
+                        503,
+                        json={
+                            "error": {
+                                "code": "INVALID_MODEL_OUTPUT",
+                                "message": "safe",
+                                "request_id": payload["request_id"],
+                            }
+                        },
+                    )
+                if payload["text"] == TIMEOUT_PROMPT or scenario == "timeout":
+                    return httpx.Response(
+                        504,
+                        json={
+                            "error": {
+                                "code": "UPSTREAM_TIMEOUT",
+                                "message": "safe",
+                                "request_id": payload["request_id"],
+                            }
+                        },
+                    )
+                intent = LocalFakeExtractor().extract(payload["text"])
+                return httpx.Response(
+                    200,
+                    json={
+                        "request_id": payload["request_id"],
+                        "intent": intent.intent,
+                        "raw_output": intent.raw_output,
+                        "model": "qwen-fixture",
+                        "revision": "qwen-r1",
+                        "latency_ms": 1.0,
+                    },
+                )
+            if scenario == "speech-unavailable":
+                return httpx.Response(
+                    503,
+                    json={
+                        "error": {
+                            "code": "UPSTREAM_UNAVAILABLE",
+                            "message": "safe",
+                            "request_id": None,
+                        }
+                    },
+                )
+            payload = json.loads(request.content)
+            return httpx.Response(
+                200,
+                content=wav_bytes(),
+                headers={
+                    "content-type": "audio/wav",
+                    "x-dimon-request-id": payload["request_id"],
+                    "x-dimon-model-revision": "kokoro-r1",
+                    "x-dimon-latency-ms": "1.0",
+                },
+            )
+
+        voice_events = [
+            json.dumps(
+                {
+                    "type": "session.ready",
+                    "protocol_version": 1,
+                    "sample_rate": 16_000,
+                    "encoding": "pcm_s16le",
+                }
+            ),
+        ]
+        if scenario == "voice-unavailable":
+            voice_events.append(
+                json.dumps(
+                    {
+                        "type": "error",
+                        "protocol_version": 1,
+                        "code": "UPSTREAM_UNAVAILABLE",
+                    }
+                )
+            )
+        else:
+            voice_events.extend(
+                [
+                    json.dumps(
+                        {
+                            "type": "transcript.partial",
+                            "protocol_version": 1,
+                            "text": "Send John",
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "type": "transcript.final",
+                            "protocol_version": 1,
+                            "text": EXACT_PROMPT,
+                        }
+                    ),
+                ]
+            )
+        transport = httpx.MockTransport(handler)
+        client = RemoteGatewayClient(
+            remote_config,
+            sync_client=httpx.Client(transport=transport),
+            async_client=httpx.AsyncClient(transport=transport),
+            websocket_connect=lambda *_args, **_kwargs: FakeConnection(
+                FakeWebSocket(voice_events)
+            ),
+        )
+        return InferenceProviders(
+            mode="remote",
+            extractor=RemoteExtractor(client),
+            recognizer=RemoteRecognizer(client),
+            voice_lifecycle=None,
+            synthesizer=RemoteSynthesizer(client),
         )
 
 

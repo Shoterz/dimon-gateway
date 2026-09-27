@@ -346,6 +346,16 @@ class FixtureSynthesizer:
             raise ValueError("speech fixture outcome is invalid")
         return self._wav()
 
+    async def synthesize_result(self, result: dict[str, Any]) -> bytes:
+        from .speech import result_summary
+
+        text = result_summary(result)
+        if text is None:
+            raise InferenceFailure(
+                "INVALID_INFERENCE_REQUEST", "speech requires a committed result"
+            )
+        return await self(text)
+
     @staticmethod
     def _wav() -> bytes:
         sample_rate = 16_000

@@ -67,10 +67,31 @@ class InferenceModeTests(unittest.TestCase):
 
         self.assertEqual(raised.exception.reason_code, "INVALID_LOCAL_INFERENCE_CONFIG")
 
-    def test_unimplemented_remote_mode_fails_with_typed_configuration_error(self) -> None:
+    def test_remote_factory_requires_service_token_configuration(self) -> None:
         with self.assertRaises(ProviderConfigurationError) as raised:
             build_inference_providers("remote", {})
-        self.assertEqual(raised.exception.reason_code, "REMOTE_PROVIDER_UNAVAILABLE")
+        self.assertEqual(raised.exception.reason_code, "INVALID_REMOTE_INFERENCE_CONFIG")
+
+    def test_remote_factory_builds_gateway_backed_providers(self) -> None:
+        providers = build_inference_providers(
+            "remote",
+            {
+                "DIMON_INFERENCE_GATEWAY_URL": "https://gateway.example.test",
+                "DIMON_CF_ACCESS_CLIENT_ID": "client-id",
+                "DIMON_CF_ACCESS_CLIENT_SECRET": "client-secret",
+            },
+        )
+
+        self.assertEqual(providers.mode, "remote")
+        self.assertIsNone(providers.voice_lifecycle)
+        self.assertEqual(
+            providers.extractor.client,
+            providers.recognizer.client,
+        )
+        self.assertEqual(
+            providers.extractor.client,
+            providers.synthesizer.client,
+        )
 
     def test_provider_bundle_is_immutable(self) -> None:
         providers = InferenceProviders(

@@ -82,6 +82,35 @@ class SpeechTests(unittest.TestCase):
         self.assertIsNone(result)
         self.assertEqual(called, [])
 
+    def test_structured_synthesizer_receives_the_committed_result(self):
+        class StructuredSynthesizer:
+            def __init__(self):
+                self.result = None
+
+            async def synthesize_result(self, result):
+                self.result = result
+                return WAV
+
+            async def __call__(self, _text):
+                raise AssertionError("structured synthesizer must not receive free-form text")
+
+        synthesizer = StructuredSynthesizer()
+        service = SpeechService(
+            base_url="http://kokoro.test",
+            audio_dir=Path(self.temp.name) / "audio",
+            synthesizer=synthesizer,
+        )
+        committed = {
+            "outcome": "EXECUTED_SYNTHETIC_TRANSFER",
+            "amount_minor": 500,
+            "resolved_action": {"recipient_display_name": "John Smith"},
+        }
+
+        artifact = asyncio.run(service.speak_result(committed, self.context))
+
+        self.assertIsNotNone(artifact)
+        self.assertEqual(synthesizer.result, committed)
+
     def test_queued_result_can_be_returned_before_kokoro_finishes(self):
         async def scenario():
             started = asyncio.Event()

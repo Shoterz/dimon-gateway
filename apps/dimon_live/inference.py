@@ -10,7 +10,12 @@ from .model_adapter import Extractor
 
 
 InferenceMode = Literal["fixture", "remote", "local"]
-Synthesizer = Callable[[str], Awaitable[bytes]]
+
+
+class Synthesizer(Protocol):
+    async def __call__(self, text: str) -> bytes: ...
+
+    async def synthesize_result(self, result: dict[str, Any]) -> bytes: ...
 
 
 class ProviderConfigurationError(ValueError):

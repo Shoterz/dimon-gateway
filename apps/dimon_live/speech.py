@@ -6,6 +6,7 @@ import json
 import secrets
 import time
 import asyncio
+import copy
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Awaitable, Callable
@@ -103,6 +104,51 @@ class KokoroSynthesizer:
             audio.raise_for_status()
             return audio.content
 
+    async def synthesize_result(self, result: dict) -> bytes:
+        text = result_summary(result)
+        if text is None:
+            raise ValueError("speech requires a committed result")
+        return await self(text)
+
+
+def result_summary(result: dict) -> str | None:
+    if result.get("outcome") == "EXECUTED_SYNTHETIC_TRANSFER":
+        action = result.get("resolved_action") or {}
+        recipient = action.get("recipient_display_name")
+        amount = result.get("amount_minor")
+        currency = result.get("currency", "SGD")
+        if not isinstance(recipient, str) or not isinstance(amount, int):
+            return None
+        reference = None
+        validated = result.get("validated_intent")
+        if isinstance(validated, dict):
+            candidate = validated.get("payment_reference")
+            reference = candidate if isinstance(candidate, str) else None
+        proposed_kind = validated.get("kind") if isinstance(validated, dict) else None
+        return build_result_summary(
+            status="EXECUTED_SYNTHETIC_TRANSFER",
+            action_kind=proposed_kind or action.get("kind", "BENEFICIARY_TRANSFER"),
+            amount=amount,
+            currency=currency,
+            recipient_display=recipient,
+            reference=reference,
+        )
+    if result.get("outcome") == "EXECUTED_SYNTHETIC_BATCH":
+        amount = result.get("amount_minor")
+        count = len(result.get("resolved_actions") or [])
+        currency = result.get("currency", "SGD")
+        if not isinstance(amount, int) or count < 1:
+            return None
+        return build_result_summary(
+            status="EXECUTED_SYNTHETIC_BATCH",
+            action_kind="BENEFICIARY_TRANSFER_BATCH",
+            amount=amount,
+            currency=currency,
+            recipient_display=None,
+            batch_count=count,
+        )
+    return None
+
 
 class SpeechService:
     def __init__(
@@ -125,33 +171,7 @@ class SpeechService:
 
     @staticmethod
     def _summary(result: dict) -> str | None:
-        if result.get("outcome") == "EXECUTED_SYNTHETIC_TRANSFER":
-            action = result.get("resolved_action") or {}
-            recipient = action.get("recipient_display_name")
-            amount = result.get("amount_minor")
-            if not isinstance(recipient, str) or not isinstance(amount, int):
-                return None
-            return build_result_summary(
-                status="EXECUTED_SYNTHETIC_TRANSFER",
-                action_kind="BENEFICIARY_TRANSFER",
-                amount=amount,
-                currency="SGD",
-                recipient_display=recipient,
-            )
-        if result.get("outcome") == "EXECUTED_SYNTHETIC_BATCH":
-            amount = result.get("amount_minor")
-            count = len(result.get("resolved_actions") or [])
-            if not isinstance(amount, int):
-                return None
-            return build_result_summary(
-                status="EXECUTED_SYNTHETIC_BATCH",
-                action_kind="BENEFICIARY_TRANSFER_BATCH",
-                amount=amount,
-                currency="SGD",
-                recipient_display=None,
-                batch_count=count,
-            )
-        return None
+        return result_summary(result)
 
     async def speak_result(self, result: dict, context) -> SpeechArtifact | None:
         text = self._summary(result)
@@ -161,7 +181,7 @@ class SpeechService:
         path = self.audio_dir / context.session_id / f"{artifact_id}.wav"
         self._artifacts[artifact_id] = (context.session_id, path, time.time() + self.ttl_seconds)
         try:
-            await self._synthesize_into(text, path)
+            await self._synthesize_into(result, text, path)
             return SpeechArtifact(artifact_id) if path.is_file() else None
         except Exception:
             self._artifacts.pop(artifact_id, None)
@@ -176,14 +196,22 @@ class SpeechService:
         path = self.audio_dir / context.session_id / f"{artifact_id}.wav"
         self._artifacts[artifact_id] = (context.session_id, path, time.time() + self.ttl_seconds)
         self._pending.add(artifact_id)
-        task = asyncio.create_task(self._synthesize_queued(text, artifact_id, path))
+        task = asyncio.create_task(
+            self._synthesize_queued(copy.deepcopy(result), text, artifact_id, path)
+        )
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
         return artifact_id
 
-    async def _synthesize_queued(self, text: str, artifact_id: str, path: Path) -> None:
+    async def _synthesize_queued(
+        self,
+        result: dict,
+        text: str,
+        artifact_id: str,
+        path: Path,
+    ) -> None:
         try:
-            await self._synthesize_into(text, path)
+            await self._synthesize_into(result, text, path)
             if not path.is_file():
                 self._artifacts.pop(artifact_id, None)
         except Exception:
@@ -191,8 +219,12 @@ class SpeechService:
         finally:
             self._pending.discard(artifact_id)
 
-    async def _synthesize_into(self, text: str, path: Path) -> None:
-        data = await self.synthesizer(text)
+    async def _synthesize_into(self, result: dict, text: str, path: Path) -> None:
+        synthesize_result = getattr(self.synthesizer, "synthesize_result", None)
+        if callable(synthesize_result):
+            data = await synthesize_result(result)
+        else:
+            data = await self.synthesizer(text)
         if not isinstance(data, bytes) or len(data) > self.max_wav_bytes:
             return
         if len(data) < 12 or data[:4] != b"RIFF" or data[8:12] != b"WAVE":
