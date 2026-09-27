@@ -53,6 +53,9 @@ class GatewayConfig:
     jwks_cache_seconds: float
     jwks_timeout_seconds: float
     qwen_api_base: str
+    qwen_model: str
+    qwen_revision: str
+    max_raw_output_bytes: int
     nemotron_url: str
     kokoro_url: str
 
@@ -104,6 +107,18 @@ class GatewayConfig:
             "DIMON_QWEN_API_BASE",
             {"http", "https"},
         )
+        qwen_model = env.get("DIMON_QWEN_MODEL", "qwen35-9b-abliterated-q5").strip()
+        if not qwen_model:
+            raise ValueError("DIMON_QWEN_MODEL is required")
+        qwen_revision = _required(env, "DIMON_QWEN_REVISION")
+        try:
+            max_raw_output_bytes = int(
+                env.get("DIMON_GATEWAY_MAX_RAW_OUTPUT_BYTES", "8192")
+            )
+        except ValueError as exc:
+            raise ValueError("DIMON_GATEWAY_MAX_RAW_OUTPUT_BYTES must be an integer") from exc
+        if not 256 <= max_raw_output_bytes <= 65_536:
+            raise ValueError("DIMON_GATEWAY_MAX_RAW_OUTPUT_BYTES is outside its safe range")
         nemotron = _loopback_url(
             env.get("DIMON_NEMOTRON_URL", "ws://127.0.0.1:8004/v1/realtime").strip(),
             "DIMON_NEMOTRON_URL",
@@ -124,6 +139,9 @@ class GatewayConfig:
             jwks_cache_seconds=cache_seconds,
             jwks_timeout_seconds=timeout_seconds,
             qwen_api_base=qwen,
+            qwen_model=qwen_model,
+            qwen_revision=qwen_revision,
+            max_raw_output_bytes=max_raw_output_bytes,
             nemotron_url=nemotron,
             kokoro_url=kokoro,
         )

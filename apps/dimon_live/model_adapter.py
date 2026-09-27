@@ -180,6 +180,29 @@ def validate_intent(raw_output: str) -> dict[str, Any]:
     return intent
 
 
+def build_qwen_request(text: str, model: str) -> dict[str, Any]:
+    """Build the single host-owned Qwen extraction request used in every mode."""
+
+    return {
+        "model": model,
+        "temperature": 0,
+        "max_tokens": 512,
+        "chat_template_kwargs": {"enable_thinking": False},
+        "messages": [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": text},
+        ],
+        "response_format": {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "raw_beneficiary_transfer_intent",
+                "strict": True,
+                "schema": TRANSFER_INTENT_SCHEMA,
+            },
+        },
+    }
+
+
 class QwenTransferExtractor:
     def __init__(
         self,
@@ -195,24 +218,7 @@ class QwenTransferExtractor:
         self.transport = transport
 
     def extract(self, text: str) -> ExtractedIntent:
-        payload = {
-            "model": self.model,
-            "temperature": 0,
-            "max_tokens": 512,
-            "chat_template_kwargs": {"enable_thinking": False},
-            "messages": [
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": text},
-            ],
-            "response_format": {
-                "type": "json_schema",
-                "json_schema": {
-                    "name": "raw_beneficiary_transfer_intent",
-                    "strict": True,
-                    "schema": TRANSFER_INTENT_SCHEMA,
-                },
-            },
-        }
+        payload = build_qwen_request(text, self.model)
         started = time.perf_counter()
         try:
             response = self.transport(

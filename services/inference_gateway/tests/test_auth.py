@@ -26,6 +26,7 @@ def valid_env() -> dict[str, str]:
         "DIMON_CF_ACCESS_AUDIENCE": "audience-tag",
         "DIMON_CF_ACCESS_ISSUER": "https://team.cloudflareaccess.com",
         "DIMON_QWEN_API_BASE": "http://127.0.0.1:8080/v1",
+        "DIMON_QWEN_REVISION": "test-revision",
         "DIMON_NEMOTRON_URL": "ws://127.0.0.1:8004/v1/realtime",
         "DIMON_KOKORO_URL": "http://127.0.0.1:3001",
     }
@@ -63,6 +64,7 @@ class GatewayConfigTests(unittest.TestCase):
             "DIMON_GATEWAY_TRUSTED_PROXIES",
             "DIMON_CF_ACCESS_AUDIENCE",
             "DIMON_CF_ACCESS_ISSUER",
+            "DIMON_QWEN_REVISION",
         ):
             with self.subTest(key=key):
                 env = valid_env()
