@@ -7,7 +7,7 @@ import json
 import math
 import os
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, WebSocket
 from pydantic import ValidationError
 
 from apps.dimon_live.model_adapter import validate_intent
@@ -18,6 +18,11 @@ from .contracts import IntentRequest
 from .errors import GatewayError, gateway_error_response
 from .idempotency import IdempotencyStore
 from .limits import BoundedExecutor, SlidingWindowLimiter
+from .transcription import (
+    NemotronPcm16Recognizer,
+    TranscriptionGateway,
+    TranscriptionRecognizer,
+)
 from .upstreams import IntentUpstream, QwenIntentUpstream
 
 
@@ -65,6 +70,9 @@ def create_gateway_app(
     intent_executor: BoundedExecutor | None = None,
     intent_limiter: SlidingWindowLimiter | None = None,
     idempotency_store: IdempotencyStore | None = None,
+    transcription_recognizer: TranscriptionRecognizer | None = None,
+    transcription_lease=None,
+    transcription_limiter: SlidingWindowLimiter | None = None,
 ) -> FastAPI:
     application = FastAPI(
         title="Dimon Inference Gateway",
@@ -79,6 +87,12 @@ def create_gateway_app(
     application.state.intent_executor = intent_executor or BoundedExecutor(1, 4, 120)
     application.state.intent_limiter = intent_limiter or SlidingWindowLimiter(12, 60)
     application.state.idempotency_store = idempotency_store or IdempotencyStore()
+    application.state.transcription_gateway = TranscriptionGateway(
+        verifier=application.state.access_verifier,
+        recognizer=transcription_recognizer or NemotronPcm16Recognizer(config.nemotron_url),
+        lease=transcription_lease,
+        limiter=transcription_limiter,
+    )
     application.add_exception_handler(GatewayError, gateway_error_response)
 
     @application.post("/v1/intent")
@@ -154,6 +168,10 @@ def create_gateway_app(
             raise
         store.succeed(identity.subject, request_id, fingerprint, response)
         return response
+
+    @application.websocket("/v1/transcription")
+    async def transcription(websocket: WebSocket):
+        await application.state.transcription_gateway.handle(websocket)
 
     return application
 
