@@ -16,6 +16,7 @@ from scripts.repository_boundary import (
 class PathViolationTests(unittest.TestCase):
     def test_rejects_private_or_generated_paths(self) -> None:
         rejected = {
+            ".env": "active environment file",
             "apps/dimon_live/.env": "active environment file",
             "apps/dimon_live/data/demo.sqlite3": "database",
             "runtime/ledgers/visitor.sqlite3": "runtime data",
@@ -56,6 +57,7 @@ class ContentViolationTests(unittest.TestCase):
             "model=/" + "home/alice/models/qwen.gguf": "personal absolute path",
             "CF_ACCESS_CLIENT_SECRET=" + "cf" + "ast_abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMN12345678": "credential",
             "api_key=" + "s" + "k-abcdefghijklmnopqrstuvwxyz012345": "credential",
+            "CF_ACCESS_CLIENT_SECRET=" + "1" * 64: "credential",
             "-----BEGIN " + "PRIVATE KEY-----": "private key",
         }
 
@@ -93,6 +95,19 @@ class CandidateSelectionTests(unittest.TestCase):
                 publication_candidates(root, prefer_git=False),
                 [Path(".gitignore"), Path("README.md")],
             )
+
+    def test_scan_rejects_files_too_large_for_safe_content_inspection(self) -> None:
+        from scripts.repository_boundary import inspect_candidates
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            oversized = root / "large.txt"
+            oversized.write_bytes(b"x" * (2 * 1024 * 1024 + 1))
+
+            violations = inspect_candidates(root, [Path("large.txt")])
+
+        self.assertEqual(len(violations), 1)
+        self.assertIn("publication size limit", violations[0].reason)
 
 
 class ScriptContractTests(unittest.TestCase):

@@ -32,7 +32,12 @@ _CACHE_PARTS = {
     "node_modules",
     "venv",
 }
+_MAX_PUBLICATION_FILE_BYTES = 2 * 1024 * 1024
 _PERSONAL_HOME = re.compile(r"/home/(?!<user>(?:/|$)|\$\{?[A-Z_]+\}?/)[A-Za-z0-9._-]+(?:/|$)")
+_CREDENTIAL_ASSIGNMENT = re.compile(
+    r"(?im)^\s*[A-Z0-9_.-]*(?:SECRET|TOKEN|PASSWORD|API[_-]?KEY)"
+    r"[A-Z0-9_.-]*[ \t]*[:=][ \t]*['\"]?([A-Za-z0-9+/_.=-]{20,})"
+)
 _SECRET_PATTERNS = (
     (re.compile(r"cfast_[A-Za-z0-9]{48}"), "credential-like Cloudflare service secret"),
     (re.compile(r"\bsk-[A-Za-z0-9]{20,}\b"), "credential-like API key"),
@@ -49,7 +54,8 @@ class Violation:
 def path_violations(path: Path) -> list[str]:
     """Return publication problems encoded by a repository-relative path."""
 
-    normalized = PurePosixPath(path.as_posix().lstrip("./"))
+    value = path.as_posix()
+    normalized = PurePosixPath(value[2:] if value.startswith("./") else value)
     lowered = normalized.as_posix().lower()
     parts = {part.lower() for part in normalized.parts}
     suffix = normalized.suffix.lower()
@@ -97,6 +103,8 @@ def content_violations(content: str) -> list[str]:
     for pattern, reason in _SECRET_PATTERNS:
         if pattern.search(content):
             reasons.append(reason)
+    if _CREDENTIAL_ASSIGNMENT.search(content):
+        reasons.append("credential-like assigned value")
     return reasons
 
 
@@ -193,11 +201,17 @@ def publication_candidates(root: Path, *, prefer_git: bool = True) -> list[Path]
 def inspect_candidates(root: Path, candidates: Iterable[Path]) -> list[Violation]:
     violations: list[Violation] = []
     for relative in candidates:
-        for reason in path_violations(relative):
+        path_reasons = path_violations(relative)
+        for reason in path_reasons:
             violations.append(Violation(relative, reason))
+        if path_reasons:
+            continue
 
         candidate = root / relative
         try:
+            if candidate.stat().st_size > _MAX_PUBLICATION_FILE_BYTES:
+                violations.append(Violation(relative, "file exceeds publication size limit"))
+                continue
             content = candidate.read_text(encoding="utf-8")
         except (UnicodeDecodeError, OSError):
             continue
@@ -213,11 +227,28 @@ def inspect_committed_tree(
 
     violations: list[Violation] = []
     for relative in candidates:
-        for reason in path_violations(relative):
+        path_reasons = path_violations(relative)
+        for reason in path_reasons:
             violations.append(Violation(relative, reason))
+        if path_reasons:
+            continue
+
+        object_name = f"{treeish}:{relative.as_posix()}"
+        size_result = subprocess.run(
+            ["git", "-C", str(root), "cat-file", "-s", object_name],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if size_result.returncode != 0:
+            violations.append(Violation(relative, "unreadable committed blob"))
+            continue
+        if int(size_result.stdout.strip()) > _MAX_PUBLICATION_FILE_BYTES:
+            violations.append(Violation(relative, "file exceeds publication size limit"))
+            continue
 
         completed = subprocess.run(
-            ["git", "-C", str(root), "show", f"{treeish}:{relative.as_posix()}"],
+            ["git", "-C", str(root), "show", object_name],
             check=False,
             capture_output=True,
         )
