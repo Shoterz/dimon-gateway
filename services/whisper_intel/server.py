@@ -1,10 +1,12 @@
 """Minimal loopback-only Intel Arc Whisper transcription service owned by this repository."""
 
+from __future__ import annotations
+
 import argparse
 import asyncio
 import json
 from dataclasses import dataclass
-from typing import Any
+from fastapi import FastAPI, WebSocket
 
 SAMPLE_RATE = 16_000
 BYTES_PER_SAMPLE = 2  # 16-bit PCM
@@ -38,8 +40,6 @@ class WhisperEngine:
 
 
 def create_app(engine):
-    from fastapi import FastAPI, WebSocket
-
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
 
     @app.get("/health")
