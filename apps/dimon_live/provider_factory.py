@@ -29,6 +29,7 @@ from .remote_inference import (
     RemoteSynthesizer,
 )
 from .voice import NemotronClient, NemotronLifecycleClient
+from .intel_voice import WhisperClient
 
 
 _LOCAL_DEFAULTS = {
@@ -36,6 +37,7 @@ _LOCAL_DEFAULTS = {
     "DIMON_QWEN_MODEL": "qwen35-9b-abliterated-q5",
     "DIMON_NEMOTRON_URL": "ws://127.0.0.1:8004/v1/realtime",
     "DIMON_KOKORO_URL": "http://127.0.0.1:3001",
+    "DIMON_WHISPER_URL": "ws://127.0.0.1:8005/v1/stream",
 }
 
 
@@ -101,25 +103,35 @@ def build_inference_providers(
             synthesizer=RemoteSynthesizer(remote_client),
         )
 
+    stt_backend = env.get("DIMON_STT_BACKEND", "nemotron").strip().lower() or "nemotron"
+    if stt_backend not in {"nemotron", "whisper_intel"}:
+        raise ProviderConfigurationError(
+            "INVALID_LOCAL_INFERENCE_CONFIG",
+            "DIMON_STT_BACKEND must be nemotron or whisper_intel",
+        )
+
     try:
         qwen_url = _endpoint(env, "DIMON_QWEN_API_BASE", {"http", "https"})
         qwen_model = _value(env, "DIMON_QWEN_MODEL")
-        nemotron_url = _endpoint(env, "DIMON_NEMOTRON_URL", {"ws", "wss"})
         kokoro_url = _endpoint(env, "DIMON_KOKORO_URL", {"http", "https"})
-        connect_timeout = float(env.get("DIMON_NEMOTRON_CONNECT_TIMEOUT", "3"))
-        result_timeout = float(env.get("DIMON_NEMOTRON_RESULT_TIMEOUT", "15"))
-        start_timeout = float(env.get("DIMON_NEMOTRON_START_TIMEOUT", "120"))
-        runtime_dir = Path(
-            env.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
-        )
-        lifecycle_path = Path(
-            env.get(
-                "DIMON_NEMOTRON_CONTROL_SOCKET",
-                str(runtime_dir / "jarvis-nemotron.ctl.sock"),
+        if stt_backend == "whisper_intel":
+            whisper_url = _endpoint(env, "DIMON_WHISPER_URL", {"ws", "wss"})
+        else:
+            nemotron_url = _endpoint(env, "DIMON_NEMOTRON_URL", {"ws", "wss"})
+            connect_timeout = float(env.get("DIMON_NEMOTRON_CONNECT_TIMEOUT", "3"))
+            result_timeout = float(env.get("DIMON_NEMOTRON_RESULT_TIMEOUT", "15"))
+            start_timeout = float(env.get("DIMON_NEMOTRON_START_TIMEOUT", "120"))
+            runtime_dir = Path(
+                env.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
             )
-        )
-        if not lifecycle_path.is_absolute():
-            raise ValueError("control socket must be absolute")
+            lifecycle_path = Path(
+                env.get(
+                    "DIMON_NEMOTRON_CONTROL_SOCKET",
+                    str(runtime_dir / "jarvis-nemotron.ctl.sock"),
+                )
+            )
+            if not lifecycle_path.is_absolute():
+                raise ValueError("control socket must be absolute")
     except (TypeError, ValueError) as exc:
         if isinstance(exc, ProviderConfigurationError):
             raise
@@ -128,17 +140,24 @@ def build_inference_providers(
             "local inference settings are invalid",
         ) from exc
 
-    return InferenceProviders(
-        mode="local",
-        extractor=QwenTransferExtractor(api_base=qwen_url, model=qwen_model),
-        recognizer=NemotronClient(
+    if stt_backend == "whisper_intel":
+        recognizer = WhisperClient(whisper_url)
+        voice_lifecycle = None
+    else:
+        recognizer = NemotronClient(
             nemotron_url,
             connect_timeout=connect_timeout,
             result_timeout=result_timeout,
-        ),
-        voice_lifecycle=NemotronLifecycleClient(
+        )
+        voice_lifecycle = NemotronLifecycleClient(
             lifecycle_path,
             timeout=start_timeout,
-        ),
+        )
+
+    return InferenceProviders(
+        mode="local",
+        extractor=QwenTransferExtractor(api_base=qwen_url, model=qwen_model),
+        recognizer=recognizer,
+        voice_lifecycle=voice_lifecycle,
         synthesizer=KokoroSynthesizer(kokoro_url),
     )

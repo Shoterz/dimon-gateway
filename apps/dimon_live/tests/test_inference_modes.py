@@ -67,6 +67,28 @@ class InferenceModeTests(unittest.TestCase):
 
         self.assertEqual(raised.exception.reason_code, "INVALID_LOCAL_INFERENCE_CONFIG")
 
+    def test_local_factory_builds_whisper_intel_backend_when_selected(self) -> None:
+        providers = build_inference_providers(
+            "local",
+            {"DIMON_STT_BACKEND": "whisper_intel"},
+        )
+
+        self.assertEqual(providers.mode, "local")
+        self.assertEqual(providers.recognizer.url, "ws://127.0.0.1:8005/v1/stream")
+        self.assertIsNone(providers.voice_lifecycle)
+
+    def test_local_factory_rejects_an_unknown_stt_backend(self) -> None:
+        with self.assertRaises(ProviderConfigurationError) as raised:
+            build_inference_providers("local", {"DIMON_STT_BACKEND": "openai"})
+
+        self.assertEqual(raised.exception.reason_code, "INVALID_LOCAL_INFERENCE_CONFIG")
+
+    def test_local_factory_default_backend_is_unchanged(self) -> None:
+        providers = build_inference_providers("local", {})
+
+        self.assertEqual(providers.recognizer.url, "ws://127.0.0.1:8004/v1/realtime")
+        self.assertIsNotNone(providers.voice_lifecycle)
+
     def test_remote_factory_requires_service_token_configuration(self) -> None:
         with self.assertRaises(ProviderConfigurationError) as raised:
             build_inference_providers("remote", {})
