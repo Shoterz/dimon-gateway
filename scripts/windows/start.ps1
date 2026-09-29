@@ -18,7 +18,7 @@ param(
 
 . (Join-Path $PSScriptRoot "common.ps1")
 trap {
-    Write-UnexpectedError $_
+    if (Get-Command Write-UnexpectedError -ErrorAction SilentlyContinue) { Write-UnexpectedError $_ } else { Write-Host "    [x] $($_.Exception.Message)" -ForegroundColor Red }
     & (Join-Path $PSScriptRoot "stop.ps1") -Quiet
     exit 1
 }
@@ -81,9 +81,11 @@ $env:DIMON_ALLOWED_ORIGINS = "http://127.0.0.1:$appPort,http://localhost:$appPor
 Write-Ok "Ports ready"
 
 function Start-Hidden([string]$Name, [string]$File, [string]$Arguments) {
-    $out = Join-Path $DimonLogDir "$Name.log"
-    $err = Join-Path $DimonLogDir "$Name.err.log"
-    return Start-Process -FilePath $File -ArgumentList $Arguments -WorkingDirectory $DimonRepo `
+    # Start-Process reads these paths as wildcards, so escape [ and ].
+    $out = [Management.Automation.WildcardPattern]::Escape((Join-Path $DimonLogDir "$Name.log"))
+    $err = [Management.Automation.WildcardPattern]::Escape((Join-Path $DimonLogDir "$Name.err.log"))
+    $cwd = [Management.Automation.WildcardPattern]::Escape($DimonRepo)
+    return Start-Process -FilePath $File -ArgumentList $Arguments -WorkingDirectory $cwd `
         -WindowStyle Hidden -RedirectStandardOutput $out -RedirectStandardError $err -PassThru
 }
 

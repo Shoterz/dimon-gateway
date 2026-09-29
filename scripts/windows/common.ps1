@@ -9,7 +9,9 @@ try {
     [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 } catch {}
 
-$DimonRepo = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
+# -LiteralPath everywhere: a folder such as "Downloads\dimon [1]" must not be
+# read as a wildcard pattern.
+$DimonRepo = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..\..")).Path
 $DimonEnvFile = Join-Path $DimonRepo "apps\dimon_live\.env"
 $DimonEnvExample = Join-Path $DimonRepo ".env.example"
 $DimonRuntime = Join-Path $DimonRepo "runtime"

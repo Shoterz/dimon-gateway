@@ -30,7 +30,7 @@ if ($Check) {
 
 # Everything Kokoro needs is installed locally; never reach out to the Hub.
 $env:HF_HUB_OFFLINE = "1"
-$repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
+$repoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..\..")).Path
 & $env:DIMON_KOKORO_PYTHON (Join-Path $repoRoot "services\kokoro\server.py") `
     --model $env:DIMON_KOKORO_MODEL_PATH `
     --config $env:DIMON_KOKORO_CONFIG_PATH `

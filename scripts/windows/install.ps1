@@ -29,7 +29,7 @@ param(
 
 . (Join-Path $PSScriptRoot "common.ps1")
 trap {
-    Write-UnexpectedError $_
+    if (Get-Command Write-UnexpectedError -ErrorAction SilentlyContinue) { Write-UnexpectedError $_ } else { Write-Host "    [x] $($_.Exception.Message)" -ForegroundColor Red }
     exit 1
 }
 $artifacts = Import-PowerShellDataFile (Join-Path $PSScriptRoot "artifacts.psd1")
@@ -125,7 +125,7 @@ $settings = @{
 if ($Mode -eq "local") {
     Write-Step "Checking the Visual C++ runtime (needed by the model runtimes)"
     $vc = Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\X64" -ErrorAction SilentlyContinue
-    $vcCurrent = $vc -and $vc.Installed -eq 1 -and $vc.Major -eq 14 -and $vc.Minor -ge 40 -and (Test-Path (Join-Path $env:WINDIR "System32\vcruntime140_1.dll"))
+    $vcCurrent = $vc -and $vc.Installed -eq 1 -and $vc.Major -eq 14 -and $vc.Minor -ge 40 -and (Test-Path -LiteralPath (Join-Path $env:WINDIR "System32\vcruntime140_1.dll"))
     if ($vcCurrent) {
         Write-Ok "Visual C++ runtime 14.$($vc.Minor) present"
     } else {

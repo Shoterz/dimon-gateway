@@ -25,7 +25,7 @@ if ($Check) {
     exit 0
 }
 
-$repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
+$repoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..\..")).Path
 Set-Location -LiteralPath $repoRoot
 uv run python (Join-Path $repoRoot "services\whisper_cpp\server.py") `
     --binary $env:DIMON_WHISPER_CPP_BINARY_PATH `
