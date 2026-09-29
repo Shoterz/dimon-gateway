@@ -82,9 +82,14 @@ $env:DIMON_ALLOWED_ORIGINS = "http://127.0.0.1:$appPort,http://localhost:$appPor
 Write-Ok "Ports ready"
 
 function Start-Hidden([string]$Name, [string]$File, [string]$Arguments) {
-    # Start-Process reads these paths as wildcards, so escape [ and ].
-    $out = [Management.Automation.WildcardPattern]::Escape((Join-Path $DimonLogDir "$Name.log"))
-    $err = [Management.Automation.WildcardPattern]::Escape((Join-Path $DimonLogDir "$Name.err.log"))
+    # Start-Process resolves these paths as wildcards: the files must already
+    # exist and [ ] must be escaped, or a folder like "dimon [1]" breaks.
+    $escaped = @()
+    foreach ($log in (Join-Path $DimonLogDir "$Name.log"), (Join-Path $DimonLogDir "$Name.err.log")) {
+        [IO.File]::WriteAllText($log, "")
+        $escaped += [Management.Automation.WildcardPattern]::Escape($log)
+    }
+    $out, $err = $escaped
     $cwd = [Management.Automation.WildcardPattern]::Escape($DimonRepo)
     return Start-Process -FilePath $File -ArgumentList $Arguments -WorkingDirectory $cwd `
         -WindowStyle Hidden -RedirectStandardOutput $out -RedirectStandardError $err -PassThru
