@@ -107,6 +107,21 @@ def _has_affirmative_target_slot(
     return recipient_first is not None or amount_first is not None
 
 
+def _payee_options(matches: Any) -> str:
+    """'John Smith ending in 4321 or John Tan ending in 2468' — the account
+    ending lets the user tell same-named payees apart without guessing."""
+
+    phrases = []
+    for match in matches:
+        digits = re.sub(r"\D", "", match.get("masked_destination") or "")
+        phrases.append(
+            f"{match['display_name']} ending in {digits[-4:]}" if digits else match["display_name"]
+        )
+    if len(phrases) <= 2:
+        return " or ".join(phrases)
+    return f"{', '.join(phrases[:-1])}, or {phrases[-1]}"
+
+
 def _evidence_bundle(text: str, intent: dict[str, Any]) -> tuple[dict[str, Any], ...]:
     item: dict[str, Any] = {"turn": 1, "text": text}
     for output_key, evidence_key in (
@@ -635,12 +650,6 @@ class ActionService:
                 extracted=extracted,
             )
         if resolution.kind == "close":
-            display_names = [match["display_name"] for match in resolution.matches]
-            question = (
-                f"Did you mean {display_names[0]}?"
-                if len(display_names) == 1
-                else "Which saved recipient did you mean?"
-            )
             return self._receipt_confirmation(
                 request_id,
                 text,
@@ -649,9 +658,10 @@ class ActionService:
                 extracted,
                 source,
                 resolution.matches,
-                question,
+                f"Did you mean {_payee_options(resolution.matches)}?",
             )
         if resolution.kind == "candidates":
+            label = intent["recipient_label"].strip()
             return self._receipt_confirmation(
                 request_id,
                 text,
@@ -660,15 +670,10 @@ class ActionService:
                 extracted,
                 source,
                 resolution.matches,
-                f"Which saved {intent['recipient_label'].strip()} do you mean?",
+                f"I see {len(resolution.matches)} saved payees named {label}. "
+                f"Did you mean {_payee_options(resolution.matches)}?",
             )
         if resolution.kind == "phonetic":
-            display_names = [match["display_name"] for match in resolution.matches]
-            question = (
-                f"Did you mean {display_names[0]}?"
-                if len(display_names) == 1
-                else "Which possible saved recipient did you mean?"
-            )
             return self._receipt_confirmation(
                 request_id,
                 text,
@@ -677,7 +682,7 @@ class ActionService:
                 extracted,
                 source,
                 resolution.matches,
-                question,
+                f"Did you mean {_payee_options(resolution.matches)}?",
             )
         if resolution.kind == "missing":
             return self._nonexecuting(

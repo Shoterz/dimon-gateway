@@ -1342,6 +1342,16 @@ class Database:
                     record["clarification_group_id"] = group_id
                     records.append(record)
 
+                masked = {
+                    row["beneficiary_id"]: row["masked_destination"]
+                    for row in connection.execute(
+                        f"""
+                        SELECT beneficiary_id, masked_destination FROM beneficiaries
+                        WHERE beneficiary_id IN ({','.join('?' for _ in records)})
+                        """,
+                        tuple(record["beneficiary_id"] for record in records),
+                    )
+                }
                 choices = [
                     {
                         "receipt_id": record["receipt_id"],
@@ -1350,6 +1360,7 @@ class Database:
                         "recipient_display_name": record[
                             "recipient_display_name"
                         ],
+                        "masked_destination": masked.get(record["beneficiary_id"]),
                         "amount_minor": record["amount_minor"],
                         "currency": record["currency"],
                         "expires_at": record["expires_at"],

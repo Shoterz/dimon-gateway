@@ -816,13 +816,35 @@ class ActionServiceTests(unittest.TestCase):
 
         self.assertEqual(result["outcome"], "CLARIFICATION_REQUEST")
         self.assertEqual(result["reason_code"], "CLOSE_RECIPIENT_MATCH")
-        self.assertEqual(result["question"], "Did you mean Alicia Powell?")
+        self.assertEqual(result["question"], "Did you mean Alicia Powell ending in 9876?")
         self.assertEqual(
             result["receipt_choices"][0]["recipient_display_name"],
             "Alicia Powell",
         )
+        self.assertEqual(result["receipt_choices"][0]["masked_destination"], "•••• 9876")
         self.assertEqual(result["receipt_choices"][0]["amount_minor"], 250)
         self.assertEqual(self.balances(), before)
+
+    def test_same_named_payees_are_told_apart_by_account_ending(self):
+        intent = {
+            **GOLDEN_INTENT,
+            "recipient_label": "John",
+            "recipient_evidence": "John",
+            "amount_minor": 500,
+            "amount_evidence": "five dollars",
+            "source_account_ref": None,
+            "source_evidence": None,
+        }
+
+        result = self.service_for(intent).process(REQUEST_ID, "Send John five dollars")
+
+        self.assertEqual(result["reason_code"], "AMBIGUOUS_RECIPIENT")
+        self.assertEqual(
+            result["question"],
+            "I see 2 saved payees named John. "
+            "Did you mean John Smith ending in 4321 or John Tan ending in 2468?",
+        )
+        self.assertEqual(self.database.get_state()["transactions"], [])
 
     def test_misspelled_first_name_requires_receipt_confirmation(self):
         before = self.balances()

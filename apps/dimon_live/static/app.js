@@ -606,7 +606,7 @@ function renderResult(result, elapsedMs) {
         ${matchLabel}
         <div class="receipt-facts">
           <span><small>From</small><strong>${escapeHtml(choice.source_label)}</strong></span>
-          <span><small>To</small><strong>${escapeHtml(choice.recipient_display_name)}</strong></span>
+          <span><small>To</small><strong>${escapeHtml(choice.recipient_display_name)}</strong>${choice.masked_destination ? ` <em class="masked-account">${escapeHtml(choice.masked_destination)}</em>` : ""}</span>
           <span><small>Amount</small><strong>${escapeHtml(formatSgd(choice.amount_minor))}</strong></span>
           ${payNow ? `<span><small>Proxy</small><strong>${escapeHtml(choice.destination_reference)}</strong></span>` : ""}
           ${choice.payment_reference ? `<span><small>Reference</small><strong>${escapeHtml(choice.payment_reference)}</strong></span>` : ""}
