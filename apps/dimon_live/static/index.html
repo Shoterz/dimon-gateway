@@ -174,6 +174,22 @@
       </section>
     </main>
 
+    <dialog id="kyc-dialog" class="approval-dialog kyc-dialog" aria-labelledby="kyc-title">
+      <p class="approval-kicker">One-time identity check · Singpass Myinfo (mock service)</p>
+      <h2 id="kyc-title">Verify your identity</h2>
+      <p class="approval-note">Banks confirm who you are before you can send money. Dimon retrieves your government-verified details from Myinfo, then registers this device as the only one allowed to approve your transfers.</p>
+      <div id="kyc-person" class="kyc-person" hidden></div>
+      <label id="kyc-consent" class="approval-unusual" hidden>
+        <input id="kyc-consent-check" type="checkbox">
+        <span>I agree to share this Myinfo data with Dimon to open and verify my account, and to register this device for approving transfers.</span>
+      </label>
+      <p id="kyc-status" class="approval-note" role="status"></p>
+      <div class="approval-actions">
+        <button id="kyc-cancel" type="button" class="approval-cancel">Not now</button>
+        <button id="kyc-next" type="button" class="approval-confirm">Retrieve Myinfo with Singpass</button>
+      </div>
+    </dialog>
+
     <dialog id="approval-dialog" class="approval-dialog" aria-labelledby="approval-title" aria-describedby="approval-note">
       <p class="approval-kicker">Deterministic confirmation · rendered from the stored receipt</p>
       <h2 id="approval-title">Sign exactly this</h2>

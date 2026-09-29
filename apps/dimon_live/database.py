@@ -24,7 +24,7 @@ from .name_resolution import (
     rank_name_candidates,
     rank_phonetic_candidates,
 )
-from . import audit_log
+from . import audit_log, kyc
 from .approval_gateway import approval_challenge, b64url_encode, verify_signature
 from .audit_log import AUDIT_SCHEMA
 from .risk_policy import (
@@ -404,7 +404,8 @@ class Database:
             connection.executescript(POLICY_SCHEMA)
             connection.executescript(AUDIT_SCHEMA)
             connection.executescript(PAYEE_SCHEMA)
-            seed_profile(connection, DEMO_USER_ID, self._clock())
+            seed_profile(connection, DEMO_USER_ID, self._clock(), kyc_status="PENDING")
+            kyc.migrate(connection)
             self._apply_v2_migrations(connection)
             count = connection.execute("SELECT COUNT(*) FROM accounts").fetchone()[0]
             if count == 0:
@@ -2365,6 +2366,59 @@ class Database:
             )
             connection.commit()
             return report.to_dict()
+
+    def start_myinfo(self, user_id: str = DEMO_USER_ID, *, now: datetime | None = None) -> dict[str, Any]:
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            result = kyc.retrieve_myinfo(connection, user_id=user_id, now=now or self._clock())
+            connection.commit()
+            return result
+
+    def complete_kyc_onboarding(
+        self,
+        *,
+        consent_id: str,
+        challenge_id: str,
+        credential_kind: str,
+        credential_id: str,
+        public_key_spki: bytes,
+        algorithm: int,
+        client_data_json: bytes,
+        authenticator_data: bytes,
+        signature: bytes | None,
+        context: ApprovalContext,
+        user_id: str = DEMO_USER_ID,
+        now: datetime | None = None,
+    ) -> dict[str, Any]:
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                result = kyc.complete_onboarding(
+                    connection,
+                    user_id=user_id,
+                    consent_id=consent_id,
+                    registration={
+                        "challenge_id": challenge_id,
+                        "credential_kind": credential_kind,
+                        "credential_id": credential_id,
+                        "public_key_spki": public_key_spki,
+                        "algorithm": algorithm,
+                        "client_data_json": client_data_json,
+                        "authenticator_data": authenticator_data,
+                        "signature": signature,
+                    },
+                    context=context,
+                    now=now or self._clock(),
+                )
+            except ApprovalRejected:
+                connection.commit()  # spent challenges and consents stay spent
+                raise
+            connection.commit()
+            return result
+
+    def kyc_status(self, user_id: str = DEMO_USER_ID) -> dict[str, Any]:
+        with self._connect() as connection:
+            return kyc.status(connection, user_id)
 
     def signing_credentials(self, rp_id: str, user_id: str = DEMO_USER_ID) -> list[dict]:
         with self._connect() as connection:

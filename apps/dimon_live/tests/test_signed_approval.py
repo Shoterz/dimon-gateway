@@ -215,7 +215,9 @@ class SignedApprovalGatewayTests(unittest.TestCase):
             r, s = decode_dss_signature(der)
             return r.to_bytes(32, "big") + s.to_bytes(32, "big")
 
-        self.database.register_signing_credential(
+        # Onboarding again binds the mock key and revokes the earlier device.
+        self.database.complete_kyc_onboarding(
+            consent_id=self.database.start_myinfo(now=NOW)["consent_id"],
             challenge_id=registration["challenge_id"],
             credential_kind="MOCK_DEVICE_KEY",
             credential_id=mock.credential_id,

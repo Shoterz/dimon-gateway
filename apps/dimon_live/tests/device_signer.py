@@ -56,8 +56,11 @@ class SoftwareAuthenticator:
         ).encode("utf-8")
 
     def enroll(self, database) -> None:
+        """KYC onboarding: Myinfo consent, then this device's passkey is bound."""
+        consent = database.start_myinfo()
         challenge = database.issue_registration_challenge()
-        database.register_signing_credential(
+        database.complete_kyc_onboarding(
+            consent_id=consent["consent_id"],
             challenge_id=challenge["challenge_id"],
             credential_kind="WEBAUTHN_PLATFORM",
             credential_id=self.credential_id,

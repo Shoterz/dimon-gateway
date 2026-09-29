@@ -81,25 +81,24 @@ class DimonLiveApiTests(unittest.TestCase):
 
         return asyncio.run(send())
 
-    def enroll_device(self):
-        self.device = SoftwareAuthenticator("http://test")
+    def onboarding_body(self, device, *, consent_id=None, rp_id=None):
+        consent_id = consent_id or self.request("POST", "/api/kyc/myinfo").json()["consent_id"]
         challenge = self.request("POST", "/api/signing/registration-challenge").json()
         self.assertEqual(challenge["rp_id"], "test")
-        response = self.request(
-            "POST",
-            "/api/signing/credentials",
-            json={
-                "challenge_id": challenge["challenge_id"],
-                "credential_kind": "WEBAUTHN_PLATFORM",
-                "credential_id": self.device.credential_id,
-                "public_key_spki": b64url_encode(self.device.public_key_spki),
-                "algorithm": -7,
-                "client_data_json": b64url_encode(
-                    self.device.client_data("webauthn.create", challenge["challenge"])
-                ),
-                "authenticator_data": b64url_encode(self.device.authenticator_data()),
-            },
-        )
+        return {
+            "consent_id": consent_id,
+            "challenge_id": challenge["challenge_id"],
+            "credential_kind": "WEBAUTHN_PLATFORM",
+            "credential_id": device.credential_id,
+            "public_key_spki": b64url_encode(device.public_key_spki),
+            "algorithm": -7,
+            "client_data_json": b64url_encode(device.client_data("webauthn.create", challenge["challenge"])),
+            "authenticator_data": b64url_encode(device.authenticator_data(rp_id=rp_id)),
+        }
+
+    def enroll_device(self):
+        self.device = SoftwareAuthenticator("http://test")
+        response = self.request("POST", "/api/kyc/complete", json=self.onboarding_body(self.device))
         self.assertEqual(response.status_code, 200, response.text)
 
     def signed_body(self, collection, receipt_id, digest, **sign_options):
@@ -238,25 +237,55 @@ class DimonLiveApiTests(unittest.TestCase):
 
     def test_registration_with_foreign_origin_is_refused(self):
         device = SoftwareAuthenticator("https://attacker.example")
-        challenge = self.request("POST", "/api/signing/registration-challenge").json()
-        response = self.request(
-            "POST",
-            "/api/signing/credentials",
-            json={
-                "challenge_id": challenge["challenge_id"],
-                "credential_kind": "WEBAUTHN_PLATFORM",
-                "credential_id": device.credential_id,
-                "public_key_spki": b64url_encode(device.public_key_spki),
-                "algorithm": -7,
-                "client_data_json": b64url_encode(
-                    device.client_data("webauthn.create", challenge["challenge"])
-                ),
-                "authenticator_data": b64url_encode(device.authenticator_data(rp_id="test")),
-            },
-        )
+        response = self.request("POST", "/api/kyc/complete", json=self.onboarding_body(device, rp_id="test"))
 
         self.assertEqual(response.status_code, 400)
         self.assertEqual(response.json()["detail"], "APPROVAL_ORIGIN_MISMATCH")
+
+    def test_devices_can_only_be_registered_through_kyc(self):
+        response = self.request("POST", "/api/signing/credentials", json={})
+        self.assertEqual(response.json()["detail"], "KYC_ONBOARDING_REQUIRED")
+        self.assertEqual(self.request("GET", "/api/kyc").json()["kyc_status"], "PENDING")
+
+        self.enroll_device()
+
+        status = self.request("GET", "/api/kyc").json()
+        self.assertEqual(status["kyc_status"], "VERIFIED")
+        self.assertEqual(status["kyc_method"], "MYINFO")
+        self.assertEqual(status["bound_credential_id"], self.device.credential_id)
+
+    def test_myinfo_consent_is_single_use_and_shows_the_person(self):
+        myinfo = self.request("POST", "/api/kyc/myinfo").json()
+        self.assertEqual(myinfo["person"]["name"], "DEMO USER")
+        self.assertIn("NRIC/FIN", myinfo["requested_attributes"])
+        first = SoftwareAuthenticator("http://test")
+        self.assertEqual(
+            self.request("POST", "/api/kyc/complete", json=self.onboarding_body(first, consent_id=myinfo["consent_id"])).status_code,
+            200,
+        )
+        second = SoftwareAuthenticator("http://test")
+        reused = self.request("POST", "/api/kyc/complete", json=self.onboarding_body(second, consent_id=myinfo["consent_id"]))
+        self.assertEqual(reused.json()["detail"], "KYC_CONSENT_USED")
+
+    def test_only_the_bound_device_can_approve_and_rebinding_revokes_the_old_one(self):
+        self.enroll_device()
+        old_device = self.device
+        choice = self.post_vague_alicia().json()["receipt_choices"][0]
+        stale = self.signed_body("receipts", choice["receipt_id"], choice["receipt_digest"])
+
+        new_device = SoftwareAuthenticator("http://test")
+        self.assertEqual(self.request("POST", "/api/kyc/complete", json=self.onboarding_body(new_device)).status_code, 200)
+
+        refused = self.request("POST", f"/api/receipts/{choice['receipt_id']}/approve", json=stale)
+        self.assertEqual(refused.json()["reason_code"], "CREDENTIAL_UNKNOWN")
+        self.device = new_device
+        accepted = self.request(
+            "POST",
+            f"/api/receipts/{choice['receipt_id']}/approve",
+            json=self.signed_body("receipts", choice["receipt_id"], choice["receipt_digest"]),
+        )
+        self.assertEqual(accepted.json()["outcome"], "EXECUTED_SYNTHETIC_TRANSFER")
+        self.assertNotEqual(old_device.credential_id, new_device.credential_id)
 
     def test_amount_clarification_endpoint_is_strict_and_does_not_recall_model(self):
         self.extractor.intent = {

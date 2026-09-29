@@ -139,8 +139,11 @@ export class DeviceApprover {
     return null;
   }
 
-  async enroll({preferPlatform = true} = {}) {
+  // Registering a device is part of KYC onboarding: the passkey is sent
+  // together with the Myinfo consent and becomes the only approving device.
+  async enroll({preferPlatform = true, consentId} = {}) {
     const challenge = await this.post("/api/signing/registration-challenge");
+    challenge.consentId = consentId;
     if (preferPlatform && await this.platformAvailable()) {
       return this.enrollPlatform(challenge);
     }
@@ -168,7 +171,8 @@ export class DeviceApprover {
       },
     });
     const response = credential.response;
-    return this.post("/api/signing/credentials", {
+    return this.post("/api/kyc/complete", {
+      consent_id: challenge.consentId,
       challenge_id: challenge.challenge_id,
       credential_kind: "WEBAUTHN_PLATFORM",
       credential_id: b64urlEncode(credential.rawId),
@@ -199,7 +203,8 @@ export class DeviceApprover {
       origin: this.origin,
     }));
     const authenticatorData = await this.mockAuthenticatorData(challenge.rp_id, 0);
-    const result = await this.post("/api/signing/credentials", {
+    const result = await this.post("/api/kyc/complete", {
+      consent_id: challenge.consentId,
       challenge_id: challenge.challenge_id,
       credential_kind: "MOCK_DEVICE_KEY",
       credential_id: credentialId,

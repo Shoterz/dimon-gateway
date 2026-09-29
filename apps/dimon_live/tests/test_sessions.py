@@ -167,10 +167,12 @@ class SessionApiTests(unittest.TestCase):
                     )).json()
                     choice = pending["receipt_choices"][0]
                     device = SoftwareAuthenticator("http://test")
+                    consent = (await first.post("/api/kyc/myinfo")).json()
                     registration = (await first.post("/api/signing/registration-challenge")).json()
                     await first.post(
-                        "/api/signing/credentials",
+                        "/api/kyc/complete",
                         json={
+                            "consent_id": consent["consent_id"],
                             "challenge_id": registration["challenge_id"],
                             "credential_kind": "WEBAUTHN_PLATFORM",
                             "credential_id": device.credential_id,

@@ -250,14 +250,28 @@ def register_credential(
     return {"credential_id": credential_id, "kind": credential_kind}
 
 
+def _bound_credential(connection: sqlite3.Connection, user_id: str) -> str | None:
+    """The one device KYC onboarding bound to this user, if any."""
+
+    try:
+        row = connection.execute(
+            "SELECT bound_credential_id FROM customer_profiles WHERE user_id = ?", (user_id,)
+        ).fetchone()
+    except sqlite3.OperationalError:
+        return None
+    return row[0] if row else None
+
+
 def list_credentials(connection: sqlite3.Connection, user_id: str, rp_id: str) -> list[dict]:
+    """Credentials allowed to approve: only the KYC-bound device."""
+
     rows = connection.execute(
         """
         SELECT credential_id, kind, created_at FROM signing_credentials
-        WHERE user_id = ? AND rp_id = ? AND status = 'ACTIVE'
+        WHERE user_id = ? AND rp_id = ? AND status = 'ACTIVE' AND credential_id = ?
         ORDER BY created_at
         """,
-        (user_id, rp_id),
+        (user_id, rp_id, _bound_credential(connection, user_id)),
     ).fetchall()
     return [dict(row) for row in rows]
 
@@ -303,6 +317,8 @@ def consume_approval(
     ).fetchone()
     if credential is None:
         raise ApprovalRejected("CREDENTIAL_UNKNOWN")
+    if credential["credential_id"] != _bound_credential(connection, user_id):
+        raise ApprovalRejected("APPROVAL_DEVICE_NOT_BOUND")
     if credential["rp_id"] != context.rp_id:
         raise ApprovalRejected("APPROVAL_RP_MISMATCH")
     sign_count = verify_assertion(

@@ -145,6 +145,8 @@ const stageCopy = {
   NEW_PAYEE_LIMIT_EXCEEDED: ["New payee limit", "S$100 for the first 24 hours"],
   UNUSUAL_AMOUNT_UNCONFIRMED: ["Amount not confirmed", "Nothing moved"],
   KYC_PENDING: ["KYC incomplete", "No ledger mutation"],
+  KYC_NOT_COMPLETED: ["Identity check not finished", "Nothing moved"],
+  APPROVAL_DEVICE_NOT_BOUND: ["Not your registered device", "Nothing moved"],
   KYC_EXPIRED: ["KYC expired", "No ledger mutation"],
   KYC_REJECTED: ["KYC rejected", "No ledger mutation"],
   AMOUNT_LIMIT_EXCEEDED: ["Over per-transfer limit", "No ledger mutation"],
@@ -359,9 +361,81 @@ async function ensureSigningCredential() {
     error.reasonCode = typeof listing.detail === "string" ? listing.detail : `HTTP_${response.status}`;
     throw error;
   }
-  if (await deviceApprover.usableCredential(listing.credentials)) return;
-  ui.elapsedLabel.textContent = "Enrolling this device for signed approval";
-  await deviceApprover.enroll();
+  const kycStatus = await fetch("/api/kyc", {cache: "no-store"}).then(r => r.json()).catch(() => ({}));
+  if (kycStatus.kyc_status === "VERIFIED" && await deviceApprover.usableCredential(listing.credentials)) return;
+  ui.elapsedLabel.textContent = "Identity check needed before your first approval";
+  await runKycOnboarding();
+}
+
+// One-time KYC: retrieve Myinfo (mock Singpass), take consent, then register
+// this device's passkey as the only device allowed to approve.
+function runKycOnboarding() {
+  const dialog = document.querySelector("#kyc-dialog");
+  const person = document.querySelector("#kyc-person");
+  const consent = document.querySelector("#kyc-consent");
+  const consentCheck = document.querySelector("#kyc-consent-check");
+  const status = document.querySelector("#kyc-status");
+  const next = document.querySelector("#kyc-next");
+  const cancel = document.querySelector("#kyc-cancel");
+  const labels = {
+    name: "Name", uinfin_masked: "NRIC/FIN", sex: "Sex", dob: "Date of birth",
+    nationality: "Nationality", residential_status: "Residential status",
+    mobile: "Mobile", email: "Email", address: "Registered address", source: "Source",
+  };
+  person.hidden = true;
+  consent.hidden = true;
+  consentCheck.checked = false;
+  status.textContent = "";
+  next.disabled = false;
+  next.textContent = "Retrieve Myinfo with Singpass";
+  let consentId = null;
+  return new Promise((resolve, reject) => {
+    const finish = error => {
+      next.onclick = null;
+      cancel.onclick = null;
+      consentCheck.onchange = null;
+      dialog.oncancel = null;
+      dialog.close();
+      if (error) reject(error); else resolve();
+    };
+    consentCheck.onchange = () => { next.disabled = !consentCheck.checked; };
+    next.onclick = async () => {
+      next.disabled = true;
+      try {
+        if (!consentId) {
+          status.textContent = "Retrieving your Myinfo…";
+          const response = await fetch("/api/kyc/myinfo", {method: "POST"});
+          if (!response.ok) throw new Error(`Myinfo returned HTTP ${response.status}`);
+          const myinfo = await response.json();
+          consentId = myinfo.consent_id;
+          person.innerHTML = `<dl>${Object.entries(labels).map(([key, label]) => `<div><dt>${escapeHtml(label)}</dt><dd>${escapeHtml(myinfo.person[key] || "—")}</dd></div>`).join("")}</dl>`;
+          person.hidden = false;
+          consent.hidden = false;
+          status.textContent = "Check your details, then agree to continue.";
+          next.textContent = "Agree and register this device";
+          next.disabled = !consentCheck.checked;
+          return;
+        }
+        status.textContent = "Registering this device… follow any Windows Hello prompt.";
+        await deviceApprover.enroll({consentId});
+        status.textContent = "Verified.";
+        finish();
+      } catch (error) {
+        status.textContent = `Could not finish: ${error.reasonCode || error.message}. You can try again.`;
+        consentId = error.reasonCode?.startsWith("KYC_CONSENT") ? null : consentId;
+        next.disabled = false;
+      }
+    };
+    const refuse = () => {
+      const error = new Error("Identity check not completed");
+      error.reasonCode = "KYC_NOT_COMPLETED";
+      finish(error);
+    };
+    cancel.onclick = refuse;
+    dialog.oncancel = event => { event.preventDefault(); refuse(); };
+    dialog.showModal();
+    next.focus();
+  });
 }
 
 function describeSigner(kind) {

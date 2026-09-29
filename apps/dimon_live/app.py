@@ -100,6 +100,10 @@ class CredentialRegistrationRequest(BaseModel):
     signature: B64Url | None = None
 
 
+class KycCompletionRequest(CredentialRegistrationRequest):
+    consent_id: Annotated[str, Field(pattern=r"^consent_[0-9a-f]{32}$")]
+
+
 class ClarificationResponseRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -339,24 +343,38 @@ def create_app(
         }
 
     @application.post("/api/signing/credentials")
-    async def register_signing_credential(
-        request: Request,
-        response: Response,
-        registration: CredentialRegistrationRequest,
-    ):
+    async def register_signing_credential(request: Request, response: Response):
+        # A device can only be registered as part of KYC onboarding, which
+        # binds it as the one device allowed to approve transfers.
+        resolve(request, response)
+        raise HTTPException(status_code=400, detail="KYC_ONBOARDING_REQUIRED")
+
+    @application.get("/api/kyc")
+    async def kyc_status(request: Request, response: Response):
+        context = resolve(request, response)
+        return context.database.kyc_status()
+
+    @application.post("/api/kyc/myinfo")
+    async def kyc_retrieve_myinfo(request: Request, response: Response):
+        context = resolve(request, response)
+        return context.database.start_myinfo()
+
+    @application.post("/api/kyc/complete")
+    async def kyc_complete(request: Request, response: Response, completion: KycCompletionRequest):
         context = resolve(request, response)
         try:
-            return context.database.register_signing_credential(
-                challenge_id=registration.challenge_id,
-                credential_kind=registration.credential_kind,
-                credential_id=registration.credential_id,
-                public_key_spki=b64url_decode(registration.public_key_spki),
-                algorithm=registration.algorithm,
-                client_data_json=b64url_decode(registration.client_data_json),
-                authenticator_data=b64url_decode(registration.authenticator_data),
+            return context.database.complete_kyc_onboarding(
+                consent_id=completion.consent_id,
+                challenge_id=completion.challenge_id,
+                credential_kind=completion.credential_kind,
+                credential_id=completion.credential_id,
+                public_key_spki=b64url_decode(completion.public_key_spki),
+                algorithm=completion.algorithm,
+                client_data_json=b64url_decode(completion.client_data_json),
+                authenticator_data=b64url_decode(completion.authenticator_data),
                 signature=(
-                    b64url_decode(registration.signature)
-                    if registration.signature is not None
+                    b64url_decode(completion.signature)
+                    if completion.signature is not None
                     else None
                 ),
                 context=approval_context(request),
