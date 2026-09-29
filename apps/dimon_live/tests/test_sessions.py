@@ -10,6 +10,7 @@ import httpx
 from apps.dimon_live.approval_gateway import b64url_encode
 from apps.dimon_live.model_adapter import ExtractedIntent
 from apps.dimon_live.tests.device_signer import SoftwareAuthenticator
+from apps.dimon_live.tests.face_fake import FakeFaceEngine, live_frames
 from apps.dimon_live.session_manager import OwnerAccessError, SessionManager
 
 
@@ -151,7 +152,11 @@ class SessionApiTests(unittest.TestCase):
                 owner_path=root / "owner.sqlite3",
                 visitor_dir=root / "visitors",
                 allowed_origins={"http://test"},
+                face_engine=FakeFaceEngine(),
             )
+
+            def frames(person="visitor-a"):
+                return [base64.b64encode(frame).decode() for frame in live_frames(person)]
 
             async def run():
                 transport = httpx.ASGITransport(app=app)
@@ -168,6 +173,7 @@ class SessionApiTests(unittest.TestCase):
                     choice = pending["receipt_choices"][0]
                     device = SoftwareAuthenticator("http://test")
                     consent = (await first.post("/api/kyc/myinfo")).json()
+                    await first.post("/api/face/register", json={"consent_id": consent["consent_id"], "frames": frames()})
                     registration = (await first.post("/api/signing/registration-challenge")).json()
                     await first.post(
                         "/api/kyc/complete",
@@ -192,6 +198,15 @@ class SessionApiTests(unittest.TestCase):
                     challenge = (await first.post(
                         f"/api/receipts/{choice['receipt_id']}/challenge", json=digest
                     )).json()
+                    # Visitor B's session has no face registered and cannot confirm A's challenge.
+                    foreign_face = await second.post(
+                        "/api/face/verify", json={"challenge_id": challenge["challenge_id"], "frames": frames()}
+                    )
+                    assert foreign_face.status_code == 400, foreign_face.text
+                    face = await first.post(
+                        "/api/face/verify", json={"challenge_id": challenge["challenge_id"], "frames": frames()}
+                    )
+                    assert face.status_code == 200, face.text
                     result = await first.post(
                         f"/api/receipts/{choice['receipt_id']}/approve",
                         json={**digest, "assertion": SoftwareAuthenticator.wire(device.sign(challenge))},

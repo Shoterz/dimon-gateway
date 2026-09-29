@@ -25,6 +25,7 @@ from .name_resolution import (
     rank_phonetic_candidates,
 )
 from . import audit_log, kyc
+from .face_id import FaceRejected, FaceStore, default_engine, face_database_path
 from .approval_gateway import approval_challenge, b64url_encode, verify_signature
 from .audit_log import AUDIT_SCHEMA
 from .risk_policy import (
@@ -378,9 +379,15 @@ class Database:
         path: Path,
         *,
         clock: Callable[[], datetime] | None = None,
+        face_engine: Any = None,
     ):
         self.path = Path(path)
         self._clock = clock or (lambda: datetime.now(timezone.utc))
+        # Faces live in their own database file, never in the ledger.
+        self.face_engine = face_engine
+        self.face_store = FaceStore(
+            face_database_path(self.path), lambda: self.face_engine or default_engine()
+        )
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
@@ -1987,7 +1994,7 @@ class Database:
         if executed:
             raise ReceiptRejected("RECEIPT_ALREADY_EXECUTED")
         try:
-            return consume_approval(
+            approval = consume_approval(
                 connection,
                 assertion,
                 purpose=purpose,
@@ -2000,6 +2007,33 @@ class Database:
         except ApprovalRejected as exc:
             # Persist the spent challenge: a failed signature burns it.
             raise ReceiptRejected(exc.reason_code, persist_status=True) from None
+        # The registered face must have confirmed this exact challenge too.
+        try:
+            face = self.face_store.consume(
+                user_id=user_id,
+                challenge_id=assertion.challenge_id,
+                receipt_digest=receipt_digest,
+                now=now,
+            )
+        except FaceRejected as exc:
+            raise ReceiptRejected(exc.reason_code, persist_status=True) from None
+        audit_log.append(
+            connection,
+            "FACE_MATCH_CONSUMED",
+            {
+                "scan_id": face["scan_id"],
+                "challenge_id": assertion.challenge_id,
+                "receipt_digest": receipt_digest,
+                "similarity": face["similarity"],
+            },
+            now=now,
+            receipt_id=receipt_id,
+        )
+        return {
+            **approval,
+            "face_scan_id": face["scan_id"],
+            "face_similarity": face["similarity"],
+        }
 
     def issue_registration_challenge(
         self, user_id: str = DEMO_USER_ID, *, now: datetime | None = None
@@ -2432,6 +2466,10 @@ class Database:
         user_id: str = DEMO_USER_ID,
         now: datetime | None = None,
     ) -> dict[str, Any]:
+        # KYC binds a face as well as a device: the face must be registered
+        # under this same Myinfo consent first.
+        if not self.face_store.enrolled_for_consent(user_id, consent_id):
+            raise ApprovalRejected("KYC_FACE_REQUIRED")
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             try:
@@ -2456,11 +2494,91 @@ class Database:
                 connection.commit()  # spent challenges and consents stay spent
                 raise
             connection.commit()
-            return result
+        self.face_store.activate(user_id, consent_id, now or self._clock())
+        return {**result, **self.face_store.status(user_id)}
 
     def kyc_status(self, user_id: str = DEMO_USER_ID) -> dict[str, Any]:
         with self._connect() as connection:
-            return kyc.status(connection, user_id)
+            status = kyc.status(connection, user_id)
+        return {**status, **self.face_store.status(user_id)}
+
+    def register_face(
+        self, consent_id: str, frames: list[bytes], *, user_id: str = DEMO_USER_ID, now: datetime | None = None
+    ) -> dict[str, Any]:
+        """Register the account's face during KYC, under a live Myinfo consent."""
+
+        now = now or self._clock()
+        with self._connect() as connection:
+            consent = connection.execute(
+                "SELECT * FROM kyc_consents WHERE consent_id = ? AND user_id = ?", (consent_id, user_id)
+            ).fetchone()
+        if consent is None:
+            raise FaceRejected("KYC_CONSENT_UNKNOWN")
+        if consent["used_at"] is not None:
+            raise FaceRejected("KYC_CONSENT_USED")
+        if now.astimezone(timezone.utc) >= datetime.fromisoformat(consent["expires_at"]):
+            raise FaceRejected("KYC_CONSENT_EXPIRED")
+        try:
+            scan = self.face_store.enroll(user_id=user_id, consent_id=consent_id, frames=frames, now=now)
+        except FaceRejected as exc:
+            self._audit_face_scan("FACE_REGISTRATION_REJECTED", exc.scan, now)
+            raise
+        self._audit_face_scan("FACE_REGISTERED", scan, now)
+        return {"scan_id": scan["scan_id"], "verdict": scan["verdict"], **self.face_store.status(user_id)}
+
+    def verify_face(
+        self, challenge_id: str, frames: list[bytes], *, user_id: str = DEMO_USER_ID, now: datetime | None = None
+    ) -> dict[str, Any]:
+        """Match a live face scan for one issued, unexpired approval challenge."""
+
+        now = now or self._clock()
+        with self._connect() as connection:
+            challenge = connection.execute(
+                "SELECT * FROM approval_challenges WHERE challenge_id = ?", (challenge_id,)
+            ).fetchone()
+        if challenge is None or challenge["purpose"] not in {"APPROVE_RECEIPT", "APPROVE_BATCH"}:
+            raise FaceRejected("APPROVAL_CHALLENGE_UNKNOWN")
+        if challenge["user_id"] != user_id:
+            raise FaceRejected("APPROVAL_USER_MISMATCH")
+        if challenge["status"] != "ISSUED":
+            raise FaceRejected("APPROVAL_CHALLENGE_REPLAYED")
+        if now.astimezone(timezone.utc) >= datetime.fromisoformat(challenge["expires_at"]):
+            raise FaceRejected("APPROVAL_CHALLENGE_EXPIRED")
+        try:
+            scan = self.face_store.verify(
+                user_id=user_id,
+                challenge_id=challenge_id,
+                receipt_digest=challenge["receipt_digest"],
+                frames=frames,
+                now=now,
+            )
+        except FaceRejected as exc:
+            self._audit_face_scan("FACE_SCAN_REJECTED", exc.scan, now, receipt_id=challenge["receipt_id"])
+            raise
+        self._audit_face_scan("FACE_SCAN_MATCHED", scan, now, receipt_id=challenge["receipt_id"])
+        return {"scan_id": scan["scan_id"], "verdict": scan["verdict"], "similarity": scan["similarity"]}
+
+    def _audit_face_scan(
+        self, event_type: str, scan: dict[str, Any] | None, now: datetime, *, receipt_id: str | None = None
+    ) -> None:
+        if scan is None:
+            return
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            audit_log.append(
+                connection,
+                event_type,
+                {
+                    key: scan[key]
+                    for key in (
+                        "scan_id", "purpose", "challenge_id", "receipt_digest", "frame_count",
+                        "face_frames", "yaw_range", "similarity", "verdict", "reason_code", "engine_version",
+                    )
+                },
+                now=now,
+                receipt_id=receipt_id,
+            )
+            connection.commit()
 
     def signing_credentials(self, rp_id: str, user_id: str = DEMO_USER_ID) -> list[dict]:
         with self._connect() as connection:

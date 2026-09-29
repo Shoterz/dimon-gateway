@@ -1259,6 +1259,7 @@ class ActionService:
             **execution,
             "trace": trace
             + [
+                {"stage": "FACE_MATCH_VERIFIED"},
                 {"stage": "DEVICE_SIGNATURE_VERIFIED"},
                 {"stage": "RECEIPT_REVALIDATED"},
                 {"stage": "SQLITE_COMMITTED"},
@@ -1315,6 +1316,7 @@ class ActionService:
         return {
             **execution,
             "trace": trace + [
+                {"stage": "FACE_MATCH_VERIFIED"},
                 {"stage": "DEVICE_SIGNATURE_VERIFIED"},
                 {"stage": "BATCH_RECEIPT_REVALIDATED"},
                 {"stage": "SQLITE_BATCH_COMMITTED"},

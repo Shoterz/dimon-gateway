@@ -88,6 +88,8 @@ class SessionManager:
         self.max_visitor_sessions = max(1, int(max_visitor_sessions))
         self.legacy_database = legacy_database
         self._owner_database: Database | None = None
+        # None means the installed OpenCV engine; tests inject a stand-in.
+        self.face_engine = None
 
     @classmethod
     def from_environment(cls, *, legacy_database: Database | None = None):
@@ -120,7 +122,8 @@ class SessionManager:
             try:
                 if now - path.stat().st_mtime > self.visitor_ttl_seconds:
                     path.unlink(missing_ok=True)
-                    for sidecar in (Path(str(path) + "-wal"), Path(str(path) + "-shm")):
+                    faces = path.with_name(f"{path.stem}.faces.db")
+                    for sidecar in (Path(str(path) + "-wal"), Path(str(path) + "-shm"), faces):
                         sidecar.unlink(missing_ok=True)
                 else:
                     active.append(path)
@@ -139,14 +142,14 @@ class SessionManager:
         if len(active) >= self.max_visitor_sessions:
             raise SessionBoundaryError("SESSION_CAP_REACHED", 429)
         session_id = secrets.token_urlsafe(24)
-        database = Database(self.visitor_dir / f"{session_id}.sqlite3")
+        database = Database(self.visitor_dir / f"{session_id}.sqlite3", face_engine=self.face_engine)
         database.initialize()
         self._touch(database)
         return SessionContext(session_id=session_id, role="visitor", database=database)
 
     def _owner_context(self) -> SessionContext:
         if self._owner_database is None:
-            self._owner_database = Database(self.owner_path)
+            self._owner_database = Database(self.owner_path, face_engine=self.face_engine)
             self._owner_database.initialize()
         self._touch(self._owner_database)
         return SessionContext(session_id="owner", role="owner", database=self._owner_database)
@@ -197,7 +200,7 @@ class SessionManager:
         if cookie and re.fullmatch(r"[A-Za-z0-9_-]{20,80}", cookie):
             candidate = self.visitor_dir / f"{cookie}.sqlite3"
             if candidate.exists() and candidate.parent == self.visitor_dir and candidate.name == f"{cookie}.sqlite3":
-                database = Database(candidate)
+                database = Database(candidate, face_engine=self.face_engine)
                 database.initialize()
                 self._touch(database)
                 return SessionContext(cookie, "visitor", database)

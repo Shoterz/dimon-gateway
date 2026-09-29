@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import json
 import tempfile
 import unittest
@@ -8,6 +9,7 @@ import httpx
 
 from apps.dimon_live.approval_gateway import b64url_encode
 from apps.dimon_live.tests.device_signer import SoftwareAuthenticator
+from apps.dimon_live.tests.face_fake import FakeFaceEngine, live_frames
 
 from apps.dimon_live.model_adapter import ExtractedIntent
 
@@ -56,6 +58,10 @@ class RecordingExtractor:
         )
 
 
+def face_frames(person="account-holder", **options):
+    return [base64.b64encode(frame).decode() for frame in live_frames(person, **options)]
+
+
 class DimonLiveApiTests(unittest.TestCase):
     def setUp(self):
         from apps.dimon_live.app import create_app
@@ -65,6 +71,7 @@ class DimonLiveApiTests(unittest.TestCase):
         self.app = create_app(
             Path(self.temp_dir.name) / "demo.sqlite3",
             extractor=self.extractor,
+            face_engine=FakeFaceEngine(),
         )
 
     def tearDown(self):
@@ -83,6 +90,8 @@ class DimonLiveApiTests(unittest.TestCase):
 
     def onboarding_body(self, device, *, consent_id=None, rp_id=None):
         consent_id = consent_id or self.request("POST", "/api/kyc/myinfo").json()["consent_id"]
+        face = self.request("POST", "/api/face/register", json={"consent_id": consent_id, "frames": face_frames()})
+        self.assertIn(face.status_code, (200, 400), face.text)
         challenge = self.request("POST", "/api/signing/registration-challenge").json()
         self.assertEqual(challenge["rp_id"], "test")
         return {
@@ -110,6 +119,7 @@ class DimonLiveApiTests(unittest.TestCase):
             json={"receipt_digest": digest},
         ).json()
         self.assertIn("challenge_id", challenge, challenge)
+        self.request("POST", "/api/face/verify", json={"challenge_id": challenge["challenge_id"], "frames": face_frames()})
         return {
             "receipt_digest": digest,
             "assertion": SoftwareAuthenticator.wire(

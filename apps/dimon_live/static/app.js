@@ -4,6 +4,7 @@ import { requestClarificationResponse } from "./clarification_response.mjs";
 import { requestAction } from "./action_request.mjs";
 import { accountDisplay } from "./account_display.mjs";
 import { DeviceApprover, wireAssertion } from "./device_approval.mjs";
+import { captureHeadTurn, faceMessages, openCamera, postFrames } from "./face_capture.mjs";
 import {
   createVoiceAudioContext,
   VoiceDeadline,
@@ -153,6 +154,10 @@ const stageCopy = {
   BALANCE_INQUIRY: ["Balance read", "Read-only · no model, no signature"],
   MONEY_REQUEST_SENT: ["Payment request sent", "You receive money · no signature"],
   APPROVAL_DEVICE_NOT_BOUND: ["Not your registered device", "Nothing moved"],
+  FACE_NOT_VERIFIED: ["Face not confirmed", "The registered face must confirm this payment"],
+  FACE_RECEIPT_MISMATCH: ["Face scan was for another payment", "Nothing moved"],
+  FACE_ALREADY_USED: ["Face scan already used", "Nothing moved"],
+  KYC_FACE_REQUIRED: ["Face registration needed", "Part of identity verification"],
   KYC_EXPIRED: ["KYC expired", "No ledger mutation"],
   KYC_REJECTED: ["KYC rejected", "No ledger mutation"],
   AMOUNT_LIMIT_EXCEEDED: ["Over per-transfer limit", "No ledger mutation"],
@@ -161,6 +166,7 @@ const stageCopy = {
   MICRO_TRANSFER_RATE_LIMITED: ["Small transfers throttled", "Rate limited · no mutation"],
   OUT_OF_BAND_CODE_INVALID: ["Token code rejected", "Sign again with the right code"],
   OUT_OF_BAND_LOCKED: ["Token locked", "Too many wrong codes"],
+  FACE_MATCH_VERIFIED: ["Face matched", "Registered face, live, this receipt"],
   DEVICE_SIGNATURE_VERIFIED: ["Device signature verified", "Bound to this receipt digest"],
   SIGNING_CREDENTIAL_REQUIRED: ["Device not enrolled", "No ledger mutation"],
   APPROVAL_SIGNATURE_INVALID: ["Signature rejected", "Does not verify"],
@@ -301,9 +307,12 @@ function accountLabel(result, accountId) {
 
 function approvalLabel(result) {
   const kind = result.approval?.credential_kind;
-  if (kind === "WEBAUTHN_PLATFORM") return "Your device biometric (Windows Hello / Touch ID)";
-  if (kind === "MOCK_DEVICE_KEY") return "Mock biometric on this device";
-  return "Your device signature";
+  const face = result.approval?.face_similarity != null
+    ? `Your face (${Math.round(result.approval.face_similarity * 100)}% match) + `
+    : "";
+  if (kind === "WEBAUTHN_PLATFORM") return `${face}Windows Hello / Touch ID`;
+  if (kind === "MOCK_DEVICE_KEY") return `${face}this device's key`;
+  return `${face}your device signature`;
 }
 
 function reasonLabel(code) {
@@ -368,13 +377,15 @@ async function ensureSigningCredential() {
     throw error;
   }
   const kycStatus = await fetch("/api/kyc", {cache: "no-store"}).then(r => r.json()).catch(() => ({}));
-  if (kycStatus.kyc_status === "VERIFIED" && await deviceApprover.usableCredential(listing.credentials)) return;
+  if (kycStatus.kyc_status === "VERIFIED" && kycStatus.face_registered
+      && await deviceApprover.usableCredential(listing.credentials)) return;
   ui.elapsedLabel.textContent = "Identity check needed before your first approval";
   await runKycOnboarding();
 }
 
-// One-time KYC: retrieve Myinfo (mock Singpass), take consent, then register
-// this device's passkey as the only device allowed to approve.
+// One-time KYC: retrieve Myinfo (mock Singpass), take consent, register the
+// account's face with the camera, then register this device's passkey as the
+// only device allowed to approve.
 function runKycOnboarding() {
   const dialog = document.querySelector("#kyc-dialog");
   const person = document.querySelector("#kyc-person");
@@ -383,6 +394,9 @@ function runKycOnboarding() {
   const status = document.querySelector("#kyc-status");
   const next = document.querySelector("#kyc-next");
   const cancel = document.querySelector("#kyc-cancel");
+  const facePanel = document.querySelector("#kyc-face");
+  const faceVideo = document.querySelector("#kyc-face-video");
+  const facePrompt = document.querySelector("#kyc-face-prompt");
   const labels = {
     name: "Name", uinfin_masked: "NRIC/FIN", sex: "Sex", dob: "Date of birth",
     nationality: "Nationality", residential_status: "Residential status",
@@ -390,13 +404,17 @@ function runKycOnboarding() {
   };
   person.hidden = true;
   consent.hidden = true;
+  facePanel.hidden = true;
   consentCheck.checked = false;
   status.textContent = "";
   next.disabled = false;
   next.textContent = "Retrieve Myinfo with Singpass";
   let consentId = null;
+  let faceRegistered = false;
+  let closeCamera = () => {};
   return new Promise((resolve, reject) => {
     const finish = error => {
+      closeCamera();
       next.onclick = null;
       cancel.onclick = null;
       consentCheck.onchange = null;
@@ -418,17 +436,49 @@ function runKycOnboarding() {
           person.hidden = false;
           consent.hidden = false;
           status.textContent = "Check your details, then agree to continue.";
-          next.textContent = "Agree and register this device";
+          next.textContent = "Agree and register my face";
           next.disabled = !consentCheck.checked;
           return;
+        }
+        if (!faceRegistered) {
+          if (facePanel.hidden) {
+            person.hidden = true;
+            consent.hidden = true;
+            facePanel.hidden = false;
+            status.textContent = "Starting the camera…";
+            closeCamera = await openCamera(faceVideo);
+            status.textContent = "Centre your face in the frame, then start the scan.";
+            next.textContent = "Scan my face";
+            next.disabled = false;
+            return;
+          }
+          const frames = await captureHeadTurn(faceVideo, {onStep: (_index, prompt) => { facePrompt.textContent = prompt; }});
+          facePrompt.textContent = "Checking…";
+          await postFrames("/api/face/register", {consent_id: consentId, frames});
+          faceRegistered = true;
+          closeCamera();
+          facePrompt.className = "face-prompt ok";
+          facePrompt.textContent = "Face registered to this account.";
         }
         status.textContent = "Registering this device… follow any Windows Hello prompt.";
         await deviceApprover.enroll({consentId});
         status.textContent = "Verified.";
         finish();
       } catch (error) {
-        status.textContent = `Could not finish: ${error.reasonCode || error.message}. You can try again.`;
-        consentId = error.reasonCode?.startsWith("KYC_CONSENT") ? null : consentId;
+        const message = faceMessages[error.reasonCode] || error.reasonCode || error.message;
+        status.textContent = `Could not finish: ${message} You can try again.`;
+        if (!faceRegistered && !facePanel.hidden) {
+          facePrompt.className = "face-prompt bad";
+          facePrompt.textContent = message;
+          next.textContent = "Scan my face again";
+        }
+        if (error.reasonCode?.startsWith("KYC_CONSENT")) {
+          consentId = null;
+          faceRegistered = false;
+          closeCamera();
+          facePanel.hidden = true;
+          next.textContent = "Retrieve Myinfo with Singpass";
+        }
         next.disabled = false;
       }
     };
@@ -444,10 +494,12 @@ function runKycOnboarding() {
   });
 }
 
+// The registered face confirms every transfer; the device key then signs the
+// same receipt (Windows Hello adds its own prompt).
 function describeSigner(kind) {
   return kind === "WEBAUTHN_PLATFORM"
-    ? {label: "Platform biometric · Windows Hello / Touch ID", action: "Approve with biometric", hold: false}
-    : {label: "Mock biometric · device-bound key (demo stand-in)", action: "Press and hold to sign", hold: true};
+    ? {label: "Your face + Windows Hello / Touch ID", action: "Confirm with your face"}
+    : {label: "Your face + this device's key", action: "Confirm with your face"};
 }
 
 // The deterministic confirmation overlay. Every fact shown comes from the
@@ -514,7 +566,21 @@ function confirmOnDevice(challenge, signerKind) {
        <ul>${unverified.map(field => `<li>${escapeHtml(field.field.replace(/^items\[\d+\]\./, ""))}: ${escapeHtml(field.draft_value)} — ${escapeHtml(field.note)}</li>`).join("")}</ul>`
     : "<strong>Independent validator: every field matches your words.</strong>";
   ui.approvalConfirm.textContent = signer.action;
-  ui.approvalConfirm.style.setProperty("--hold", "0");
+  const facePrompt = document.querySelector("#approval-face-prompt");
+  const faceVideo = document.querySelector("#approval-face-video");
+  facePrompt.className = "face-prompt";
+  facePrompt.textContent = "Starting the camera…";
+  let closeCamera = () => {};
+  let scanning = false;
+  const cameraReady = openCamera(faceVideo).then(close => {
+    closeCamera = close;
+    facePrompt.textContent = "When you are ready, press Confirm and follow the prompts.";
+    return true;
+  }).catch(error => {
+    facePrompt.className = "face-prompt bad";
+    facePrompt.textContent = faceMessages[error.reasonCode] || error.message;
+    return false;
+  });
   const needsCode = Boolean(review.requires_out_of_band);
   ui.approvalOob.hidden = !needsCode;
   ui.approvalOobCode.value = "";
@@ -539,7 +605,7 @@ function confirmOnDevice(challenge, signerKind) {
     && (!needsReadBack || readBackPlayed)
     && (!needsUnusual || ui.approvalUnusualCheck.checked);
   const syncConfirm = () => {
-    ui.approvalConfirm.disabled = !allReady();
+    ui.approvalConfirm.disabled = !allReady() || scanning;
     ui.approvalConfirm.title = needsReadBack && !readBackPlayed ? "Listen to the read-back first" : "";
   };
   const playReadBack = () => {
@@ -552,9 +618,6 @@ function confirmOnDevice(challenge, signerKind) {
   syncConfirm();
   if (readBack && (needsReadBack || lastRequestWasSpoken)) playReadBack();
   return new Promise(resolve => {
-    let holdTimer = null;
-    let holdStarted = 0;
-    let frame = null;
     const cleanup = confirmed => {
       const result = confirmed
         ? {
@@ -565,54 +628,41 @@ function confirmOnDevice(challenge, signerKind) {
           }
         : {confirmed: false};
       stopReadBack();
+      closeCamera();
+      cameraReady.then(() => closeCamera());
       ui.approvalReadBackPlay.onclick = null;
       ui.approvalUnusualCheck.onchange = null;
       ui.approvalOobCode.oninput = null;
       ui.approvalConfirm.disabled = false;
-      clearTimeout(holdTimer);
-      cancelAnimationFrame(frame);
       ui.approvalConfirm.onclick = null;
-      ui.approvalConfirm.onpointerdown = null;
-      ui.approvalConfirm.onpointerup = null;
-      ui.approvalConfirm.onpointerleave = null;
-      ui.approvalConfirm.onkeydown = null;
-      ui.approvalConfirm.onkeyup = null;
       ui.approvalCancel.onclick = null;
       ui.approvalDialog.oncancel = null;
       ui.approvalDialog.close();
       resolve(result);
     };
-    const startHold = () => {
-      if (holdTimer || !allReady()) return;
-      holdStarted = performance.now();
-      const paint = () => {
-        const progress = Math.min(1, (performance.now() - holdStarted) / 1200);
-        ui.approvalConfirm.style.setProperty("--hold", String(progress));
-        frame = requestAnimationFrame(paint);
-      };
-      paint();
-      holdTimer = setTimeout(() => cleanup(true), 1200);
+    // Face confirmation: a live head-turn scan, matched by the gateway against
+    // the face registered at KYC and bound to this exact challenge.
+    ui.approvalConfirm.onclick = async () => {
+      if (!allReady() || scanning) return;
+      if (!await cameraReady) return;
+      scanning = true;
+      syncConfirm();
+      facePrompt.className = "face-prompt";
+      try {
+        const frames = await captureHeadTurn(faceVideo, {onStep: (_index, prompt) => { facePrompt.textContent = prompt; }});
+        facePrompt.textContent = "Checking your face…";
+        const match = await postFrames("/api/face/verify", {challenge_id: challenge.challenge_id, frames});
+        facePrompt.className = "face-prompt ok";
+        facePrompt.textContent = `Face matched (${Math.round((match.similarity || 0) * 100)}%). Signing…`;
+        cleanup(true);
+      } catch (error) {
+        facePrompt.className = "face-prompt bad";
+        facePrompt.textContent = error.message;
+        ui.approvalConfirm.textContent = error.reasonCode === "FACE_LOCKED" ? "Locked" : "Scan again";
+        scanning = error.reasonCode === "FACE_LOCKED";
+        syncConfirm();
+      }
     };
-    const stopHold = () => {
-      clearTimeout(holdTimer);
-      cancelAnimationFrame(frame);
-      holdTimer = null;
-      ui.approvalConfirm.style.setProperty("--hold", "0");
-    };
-    if (signer.hold) {
-      ui.approvalConfirm.onpointerdown = startHold;
-      ui.approvalConfirm.onpointerup = stopHold;
-      ui.approvalConfirm.onpointerleave = stopHold;
-      ui.approvalConfirm.onkeydown = event => {
-        if ((event.key === " " || event.key === "Enter") && !event.repeat) {
-          event.preventDefault();
-          startHold();
-        }
-      };
-      ui.approvalConfirm.onkeyup = stopHold;
-    } else {
-      ui.approvalConfirm.onclick = () => { if (allReady()) cleanup(true); };
-    }
     ui.approvalCancel.onclick = () => cleanup(false);
     ui.approvalDialog.oncancel = event => {
       event.preventDefault();

@@ -23,6 +23,7 @@ from apps.dimon_live.approval_gateway import ApprovalRejected
 from apps.dimon_live.database import Database, ReceiptRejected
 from apps.dimon_live.receipts import ReceiptDraft
 from apps.dimon_live.tests.device_signer import SoftwareAuthenticator
+from apps.dimon_live.tests.face_fake import live_frames
 
 NOW = datetime(2026, 9, 29, 12, 0, tzinfo=timezone.utc)
 
@@ -215,9 +216,12 @@ class SignedApprovalGatewayTests(unittest.TestCase):
             r, s = decode_dss_signature(der)
             return r.to_bytes(32, "big") + s.to_bytes(32, "big")
 
-        # Onboarding again binds the mock key and revokes the earlier device.
+        # Onboarding again (same face) binds the mock key and revokes the earlier device.
+        consent_id = self.database.start_myinfo(now=NOW)["consent_id"]
+        self.database.register_face(consent_id, live_frames(self.device.person), now=NOW)
+        mock.database = self.database
         self.database.complete_kyc_onboarding(
-            consent_id=self.database.start_myinfo(now=NOW)["consent_id"],
+            consent_id=consent_id,
             challenge_id=registration["challenge_id"],
             credential_kind="MOCK_DEVICE_KEY",
             credential_id=mock.credential_id,

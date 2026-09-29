@@ -4,8 +4,8 @@
 
 Dimon is a banking assistant you can talk to. You type or say what you want,
 for example *"Send John Smith 50 dollars from savings"*, and Dimon prepares the
-transfer for you. Nothing moves until **you** approve it with your fingerprint,
-face, or PIN.
+transfer for you. Nothing moves until **you** confirm it with **your face**,
+using your computer's camera.
 
 > **Safe to try.** Dimon uses a pretend bank with pretend money. It never
 > connects to a real bank account and never moves real money.
@@ -83,9 +83,12 @@ Every request passes through several independent checks:
    device you registered then can approve payments. How much checking a
    payment needs depends on its risk (see the table below), and past payments
    are used to spot amounts that don't fit.
-6. **You sign on your device.** A confirmation window shows the exact details.
-   You approve with Windows Hello (fingerprint, face, or PIN). Your signature
-   only works for that one exact transfer, only once, and only for 2 minutes.
+6. **You confirm with your face.** A confirmation window shows the exact
+   details. You look at the camera and turn your head slightly; Dimon checks
+   that it's the face registered to the account, and that it's a real person
+   (a photo can't turn its head). Your device then signs the transfer. The
+   confirmation only works for that one exact transfer, only once, and only
+   for 2 minutes.
 7. **Everything is recorded.** Every step is written to a tamper-evident log.
    If anyone changes the log afterwards, Dimon can tell.
 
@@ -109,6 +112,7 @@ transfer. The full technical detail, with tests, is in
 | | **Demo mode** (quick try) | **Local AI** (the real thing) |
 | --- | --- | --- |
 | Computer | Any Windows 10 or 11 PC | Windows 10 or 11, 64-bit Intel or AMD processor |
+| Camera | A webcam (built-in is fine): every transfer is confirmed with your face | Same |
 | Memory (RAM) | Any | 16 GB recommended (12 GB minimum) |
 | Free disk space | About 1 GB | About 12 GB |
 | Graphics card | Not needed | Optional. NVIDIA, AMD, and Intel all work; without one, Dimon uses the processor (slower) |
@@ -156,7 +160,7 @@ git clone --branch backend-edits https://github.com/Shoterz/dimon-gateway.git
 
    ```text
    How do you want to run Dimon?
-     [1] Demo mode  - ready in about a minute, no model downloads, scripted AI responses.
+     [1] Demo mode  - ready in about a minute, scripted AI responses (only the 39 MB face models download).
      [2] Local AI   - real speech and language models on this PC (~9 GB download).
    Choose 1 or 2 (default 1)
    ```
@@ -242,20 +246,24 @@ model loads.
 3. Dimon shows a **draft**. Look at the steps on the screen: *Draft only →
    Validator agreed → Risk policy passed*. **No money has moved yet.**
 4. Click **Review & sign**.
-5. The **first time only**, Dimon verifies your identity and registers your
-   device. A mock **Singpass Myinfo** window shows your (made-up) details;
-   tick the consent box and continue. You may see a Windows Hello prompt;
-   follow it. From then on, only this device can approve payments.
+5. The **first time only**, Dimon verifies your identity:
+   - a mock **Singpass Myinfo** window shows your (made-up) details; tick the
+     consent box and continue;
+   - **register your face:** allow the camera, click **Scan my face**, look
+     straight at the camera, then slowly turn your head to one side and back
+     (about 3 seconds);
+   - Dimon registers this device (you may see a Windows Hello prompt).
+
+   From then on, only your face on this device can approve payments. The
+   account has exactly one face linked to it.
 6. A confirmation window shows exactly what will happen: who gets paid, how
    much, from which account, and a short fingerprint of the transfer. For
    larger or unusual amounts it also reads the details out loud, and you can
    sign only after the read-back has finished.
-7. Approve it:
-   - **With Windows Hello:** click **Approve with biometric**, then use your
-     fingerprint, face, or PIN.
-   - **Without Windows Hello:** press and **hold** the **Press and hold to
-     sign** button for about a second. (This is Dimon's clearly labelled
-     stand-in for a fingerprint.)
+7. Click **Confirm with your face**, then follow the prompts: look at the
+   camera, turn your head slightly to one side, and back. When it says
+   **Face matched**, your device signs the transfer (with Windows Hello you
+   also see its prompt).
 8. The transfer settles. The account balances update, and the
    **Settlement summary** shows what moved, how you approved it, and a
    reference number.
@@ -360,7 +368,7 @@ that gets past the filter and is refused when the draft is checked.
 | AI answers | Pre-recorded, for the example prompts only | A real language model running on your PC |
 | Voice | Recorded sample transcript | Real speech recognition and spoken replies |
 | Signing, checks, limits, audit log | **Real** | **Real** |
-| Download | None | About 9 GB, once |
+| Download | About 39 MB (face models), once | About 9 GB, once |
 | Best for | A quick look, or a PC without much memory | The full experience and live demos |
 
 Switch any time: run `install.cmd` again and pick the other option.
@@ -380,7 +388,11 @@ pieces and keeps everything that's already fine.
 | "Port 8890 is used by …" | Nothing to do. Dimon picks another free port and opens the right address. |
 | "… stopped while starting" | The window shows the last lines of that part's log. Run `install.cmd` again. All logs are in the `runtime\logs` folder. |
 | "Fixture no match" after a request | You're in demo mode, which only knows the example prompts. Use one of those, or switch to Local AI. |
-| No fingerprint or face prompt when signing | Windows Hello isn't set up. Set up a PIN, face, or fingerprint in **Windows Settings → Accounts → Sign-in options**, or just use **Press and hold to sign**. |
+| "Allow the camera for this site" / the camera box stays black | Click the camera icon next to the address bar and allow it, and check **Windows Settings → Privacy & security → Camera**. Close other apps using the camera (Teams, Zoom). |
+| "Turn your head a little further" | Liveness needs a clear head turn. Turn slowly to one side (about as far as glancing at a side mirror) and back while the prompts run. |
+| "No face was seen" / "does not match" | Face the camera in even light, remove anything covering your face, and keep only yourself in view. After 5 failed scans, face confirmation locks for 10 minutes. |
+| "Face recognition is not installed" | Run `install.cmd` again; it downloads the two small face models. |
+| Windows Hello prompt appears after the face scan | That's expected when Windows Hello is set up: your face confirms the transfer, and Windows Hello unlocks the device key that signs it. |
 | Windows Hello never appears, even though it's set up | Open Dimon at **http://localhost:8890**, not `http://127.0.0.1:8890`. Windows Hello only works with the `localhost` address. |
 | The microphone does nothing | Allow the microphone for your browser (click the icon next to the address bar), and check **Windows Settings → Privacy & security → Microphone**. |
 | The first request takes a long time | Normal for Local AI on a laptop: 10–20 seconds per request, longer without a graphics card. |
@@ -413,10 +425,19 @@ That's the point of Dimon. The AI is helpful but can make mistakes or be
 tricked, so it is never allowed to move money by itself. Your signature is the
 only thing that can.
 
-**What is the "mock biometric" / "press and hold"?**
-When Windows Hello isn't available, Dimon uses a signing key kept safely inside
-your browser instead. It works the same way as a real one, but a press-and-hold
-button stands in for your fingerprint. It is clearly labelled as a stand-in.
+**How does face confirmation work, and what is stored?**
+When you verify your identity, Dimon turns your face into a list of 128
+numbers (a "template") and stores it in its own database, separate from the
+ledger. No photo is ever saved. To confirm a transfer, a short camera scan is
+compared with that template on your own PC; the images are checked in memory
+and discarded, and only a record of the result (scores and a fingerprint of
+each frame) is kept. A face match works for one transfer only. One account
+has exactly one face: registering a new device later needs that same face.
+
+**What signs the transfer after my face matches?**
+A signing key kept safely in your browser (or Windows Hello's key, if it is
+set up). The face match and the device signature are both checked before any
+money moves.
 
 **What is the "hardware token"?**
 Banks often ask for an extra code for large transfers. Dimon simulates this
@@ -424,7 +445,9 @@ with a separate token window. Its code only works for that one exact transfer.
 
 **Where are my files?**
 The project folder holds the program and your settings (`apps\dimon_live\.env`).
-The large AI files are in `%LOCALAPPDATA%\DimonGateway`.
+The large AI files and the face recognition models are in
+`%LOCALAPPDATA%\DimonGateway`. Each session's face database sits next to its
+ledger in `runtime\ledgers`.
 
 ---
 
@@ -510,7 +533,8 @@ PowerShell 5.1 that ships with Windows. Service ports come from the URLs in
 (`-Check` validates without starting). The Linux GPU host uses
 `services/gpu_host` and the `run.sh` launchers instead.
 
-Fixture mode runs the full app without model downloads.
+Fixture mode runs the language and speech features without model downloads;
+face confirmation uses two small pinned OpenCV models (about 39 MB).
 Model weights and compiled runtimes are kept outside Git.
 The raw model ports stay private on loopback: Qwen on `127.0.0.1:8080`, Nemotron speech recognition on
 `127.0.0.1:8004` (whisper.cpp on `127.0.0.1:8006` on Windows), and Kokoro on

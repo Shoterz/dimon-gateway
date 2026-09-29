@@ -285,6 +285,11 @@ button:focus-visible, textarea:focus-visible, a:focus-visible { outline: 2px sol
 .approval-validation.pass { border-left-color: var(--settled); }
 .approval-validation.attention { border-left-color: var(--amber); background: rgba(241, 202, 116, .06); }
 .approval-validation ul { margin: 4px 0 0; padding-left: 18px; }
+.face-panel { display: grid; gap: 8px; margin: 0 0 12px; padding: 10px; border: 1px solid rgba(120, 224, 207, .35); }
+.face-video { width: 100%; max-height: 220px; aspect-ratio: 4 / 3; object-fit: cover; background: #05080a; transform: scaleX(-1); border: 1px solid var(--line); }
+.face-prompt { margin: 0; font-size: 13px; line-height: 1.4; }
+.face-prompt.ok { color: var(--signal); }
+.face-prompt.bad { color: #ff8f8f; }
 .approval-oob { display: grid; gap: 6px; margin: 0 0 12px; padding: 10px; border: 1px solid rgba(241, 202, 116, .5); font-size: 12px; }
 .approval-oob input { min-height: 44px; padding: 6px 10px; border: 1px solid var(--line); background: var(--ink); color: var(--paper); font: 20px "Cascadia Mono", Consolas, monospace; letter-spacing: .2em; }
 .approval-oob a { color: var(--amber); }

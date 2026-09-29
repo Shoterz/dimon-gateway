@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
+import base64
+import binascii
 import os
 import logging
 from pathlib import Path
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 from urllib.parse import urlparse
 from uuid import UUID, uuid4
 
@@ -21,6 +24,7 @@ from .approval_gateway import (
     b64url_decode,
 )
 from .database import Database, ReceiptRejected
+from .face_id import MAX_FRAMES, MIN_FRAMES, FaceRejected
 from .payees import PayeeSaveRejected
 from .read_back import build_read_back
 from .tencent_tts import read_back_synthesizer_from_env
@@ -105,6 +109,42 @@ class KycCompletionRequest(CredentialRegistrationRequest):
     consent_id: Annotated[str, Field(pattern=r"^consent_[0-9a-f]{32}$")]
 
 
+# One camera frame, base64 (JPEG from the browser canvas). Frames are analysed
+# in memory and discarded; only their hashes are kept.
+FaceFrame = Annotated[str, Field(min_length=64, max_length=560_000, pattern=r"^[A-Za-z0-9+/=_-]+$")]
+FaceFrames = Annotated[list[FaceFrame], Field(min_length=MIN_FRAMES, max_length=MAX_FRAMES)]
+
+
+class FaceRegistrationRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    consent_id: Annotated[str, Field(pattern=r"^consent_[0-9a-f]{32}$")]
+    frames: FaceFrames
+
+
+class FaceVerificationRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    challenge_id: ChallengeId
+    frames: FaceFrames
+
+
+def _decode_frames(frames: list[str]) -> list[bytes]:
+    decoded = []
+    for frame in frames:
+        normalized = frame.replace("-", "+").replace("_", "/")
+        try:
+            decoded.append(base64.b64decode(normalized + "=" * (-len(normalized) % 4), validate=True))
+        except (ValueError, binascii.Error) as exc:
+            raise HTTPException(status_code=400, detail="FACE_FRAME_INVALID") from exc
+    return decoded
+
+
+def _face_error(exc: FaceRejected) -> HTTPException:
+    status = {"FACE_ENGINE_UNAVAILABLE": 503, "FACE_LOCKED": 429}.get(exc.reason_code, 400)
+    return HTTPException(status_code=status, detail=exc.reason_code)
+
+
 class SavePayeeRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -151,6 +191,7 @@ def create_app(
     voice_bridge: VoiceBridge | None = None,
     speech_service: SpeechService | None = None,
     providers: InferenceProviders | None = None,
+    face_engine: Any = None,
 ) -> FastAPI:
     if providers is not None and any(
         dependency is not None
@@ -163,7 +204,7 @@ def create_app(
     )
     legacy_database: Database | None = None
     if db_path is not None:
-        legacy_database = Database(Path(db_path))
+        legacy_database = Database(Path(db_path), face_engine=face_engine)
         legacy_database.initialize()
     manager = session_manager or (
         SessionManager.from_environment(legacy_database=legacy_database)
@@ -178,6 +219,8 @@ def create_app(
             max_visitor_sessions=int(os.environ.get("DIMON_MAX_VISITOR_SESSIONS", "25")),
         )
     )
+    if face_engine is not None:
+        manager.face_engine = face_engine
     selected_extractor = extractor or selected_providers.extractor
     application = FastAPI(title="Dimon Live", version="0.1.0")
     application.state.database = legacy_database
@@ -366,6 +409,29 @@ def create_app(
     async def kyc_retrieve_myinfo(request: Request, response: Response):
         context = resolve(request, response)
         return context.database.start_myinfo()
+
+    @application.get("/api/face")
+    async def face_status(request: Request, response: Response):
+        context = resolve(request, response)
+        return context.database.face_store.status(DEMO_USER_ID)
+
+    @application.post("/api/face/register")
+    async def face_register(request: Request, response: Response, body: FaceRegistrationRequest):
+        context = resolve(request, response)
+        frames = _decode_frames(body.frames)
+        try:
+            return await asyncio.to_thread(context.database.register_face, body.consent_id, frames)
+        except FaceRejected as exc:
+            raise _face_error(exc) from exc
+
+    @application.post("/api/face/verify")
+    async def face_verify(request: Request, response: Response, body: FaceVerificationRequest):
+        context = resolve(request, response)
+        frames = _decode_frames(body.frames)
+        try:
+            return await asyncio.to_thread(context.database.verify_face, body.challenge_id, frames)
+        except FaceRejected as exc:
+            raise _face_error(exc) from exc
 
     @application.post("/api/kyc/complete")
     async def kyc_complete(request: Request, response: Response, completion: KycCompletionRequest):
@@ -637,6 +703,14 @@ def create_app(
         return Response(
             (STATIC_DIR / "receipt_approval.mjs").read_text(encoding="utf-8"),
             media_type="application/javascript",
+        )
+
+    @application.get("/static/face_capture.mjs", include_in_schema=False)
+    async def face_capture_script():
+        return Response(
+            (STATIC_DIR / "face_capture.mjs").read_text(encoding="utf-8"),
+            media_type="application/javascript",
+            headers={"Cache-Control": "no-store"},
         )
 
     @application.get("/static/device_approval.mjs", include_in_schema=False)

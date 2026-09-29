@@ -111,6 +111,19 @@ function show(event) {
         add("gateway", "Gateway", "Asked the registered device to sign this exact receipt", "The signature covers the receipt's digest, so it cannot be moved to another payment.");
       }
       break;
+    case "FACE_REGISTERED":
+      add("gateway", "Face ID", "Face registered to the account", "One face per account. Stored as a template in its own database, never as a photo.");
+      break;
+    case "FACE_REGISTRATION_REJECTED":
+    case "FACE_SCAN_REJECTED":
+      add("refused", "Face ID", `Face scan refused: ${words(p.reason_code)}`, p.similarity != null ? `Similarity ${Math.round(p.similarity * 100)}%` : "Nothing can be signed without the registered face.");
+      break;
+    case "FACE_SCAN_MATCHED":
+      add("gateway", "Face ID", `Face matched (${Math.round((p.similarity || 0) * 100)}%)`, "Live head turn, bound to this exact receipt's challenge.");
+      break;
+    case "FACE_MATCH_CONSUMED":
+      add("gateway", "Gateway", "Face match spent inside execution", "It cannot be reused for another payment.");
+      break;
     case "DEVICE_SIGNATURE_VERIFIED":
       add("gateway", "Gateway", "Device signature verified", p.credential_kind ? `Signed with ${words(p.credential_kind)}` : null);
       break;

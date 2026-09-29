@@ -22,6 +22,22 @@
             Dir    = 'runtimes\whisper-cpp'
         }
     }
+    # Face registration and confirmation (OpenCV Zoo, pinned revision). Needed
+    # in every mode, because every transaction is confirmed by face.
+    FaceModels = @{
+        FaceDetector = @{
+            Url    = 'https://media.githubusercontent.com/media/opencv/opencv_zoo/47534e27c9851bb1128ccc0102f1145e27f23f98/models/face_detection_yunet/face_detection_yunet_2023mar.onnx'
+            Sha256 = '8f2383e4dd3cfbb4553ea8718107fc0423210dc964f9f4280604804ed2552fa4'
+            Bytes  = 232589
+            File   = 'models\face\face_detection_yunet_2023mar.onnx'
+        }
+        FaceRecognizer = @{
+            Url    = 'https://media.githubusercontent.com/media/opencv/opencv_zoo/47534e27c9851bb1128ccc0102f1145e27f23f98/models/face_recognition_sface/face_recognition_sface_2021dec.onnx'
+            Sha256 = '0ba9fbfa01b5270c96627c4ef784da859931e02f04419c829e83484087c34e79'
+            Bytes  = 38696353
+            File   = 'models\face\face_recognition_sface_2021dec.onnx'
+        }
+    }
     Models = @{
         Qwen = @{
             Url    = 'https://huggingface.co/mradermacher/Huihui-Qwen3.5-9B-abliterated-GGUF/resolve/9f646d7eda193ddf2348134f3bff3d49eed7a2c6/Huihui-Qwen3.5-9B-abliterated.Q5_K_M.gguf'

@@ -72,7 +72,7 @@ if ($Mode -eq "auto") {
     } else {
         Write-Host ""
         Write-Host "  How do you want to run Dimon?" -ForegroundColor White
-        Write-Host "    [1] Demo mode  - ready in about a minute, no model downloads, scripted AI responses."
+        Write-Host "    [1] Demo mode  - ready in about a minute, scripted AI responses (only the 39 MB face models download)."
         Write-Host "    [2] Local AI   - real speech and language models on this PC (~9 GB download)."
         $choice = Read-Host "  Choose 1 or 2 (default 1)"
         $Mode = if ($choice -eq "2") { "local" } else { "demo" }
@@ -184,6 +184,17 @@ if ($Mode -eq "local") {
     $settings["DIMON_KOKORO_CONFIG_PATH"] = $paths["KokoroConfig"]
     $settings["DIMON_KOKORO_VOICE_PATH"] = $paths["KokoroVoice"]
     $settings["DIMON_KOKORO_PYTHON"] = $kokoroPython
+}
+
+# ------------------------------------------------------ face confirmation
+# Every mode needs these: KYC registers the account's face and every
+# transaction is confirmed by it.
+Write-Step "Downloading the face recognition models (about 39 MB)"
+foreach ($name in "FaceDetector", "FaceRecognizer") {
+    $artifact = $artifacts.FaceModels[$name]
+    $destination = Join-Path $installRoot $artifact.File
+    Get-VerifiedFile $artifact $destination $name
+    $settings[$(if ($name -eq "FaceDetector") { "DIMON_FACE_DETECTOR_PATH" } else { "DIMON_FACE_RECOGNIZER_PATH" })] = $destination
 }
 
 Set-DotEnvValues $settings
