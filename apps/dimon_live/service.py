@@ -6,6 +6,7 @@ import re
 import sqlite3
 from typing import Any
 
+from . import input_firewall
 from .approval_gateway import ApprovalContext, DeviceAssertion
 from .batch_grounding import bind_batch_evidence
 from .batch_receipts import BatchReceiptDraft, BatchReceiptItemDraft
@@ -225,6 +226,18 @@ class ActionService:
             }
 
         trace: list[dict[str, Any]] = []
+        verdict = input_firewall.inspect(text, source="user_request")
+        if not verdict.allowed:
+            # The planner never sees blocked text; the attempt is recorded.
+            return self._nonexecuting(
+                request_id,
+                text,
+                "BLOCKED",
+                "PROMPT_INJECTION_BLOCKED",
+                trace,
+                extra={"firewall": verdict.to_dict()},
+            )
+        trace.append({"stage": "INPUT_FIREWALL_PASSED"})
         try:
             extracted = self.extractor.extract(text)
         except InferenceFailure as exc:
@@ -975,6 +988,19 @@ class ActionService:
         *,
         user_id: str = DEMO_USER_ID,
     ) -> dict[str, Any]:
+        verdict = input_firewall.inspect(text, source="clarification_reply")
+        if not verdict.allowed:
+            return {
+                "outcome": "BLOCKED",
+                "request_id": request_id,
+                "reason_code": "PROMPT_INJECTION_BLOCKED",
+                "firewall": verdict.to_dict(),
+                "trace": [
+                    {"stage": "CLARIFICATION_RESPONSE_RECEIVED"},
+                    {"stage": "PROMPT_INJECTION_BLOCKED"},
+                ],
+                "state": self.database.get_state(),
+            }
         return self._with_validation(
             self._respond_to_clarification(
                 clarification_id, request_id, text, user_id=user_id
