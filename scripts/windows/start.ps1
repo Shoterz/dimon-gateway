@@ -82,17 +82,18 @@ $env:DIMON_ALLOWED_ORIGINS = "http://127.0.0.1:$appPort,http://localhost:$appPor
 Write-Ok "Ports ready"
 
 function Start-Hidden([string]$Name, [string]$File, [string]$Arguments) {
-    # Start-Process resolves these paths as wildcards: the files must already
-    # exist and [ ] must be escaped, or a folder like "dimon [1]" breaks.
-    $escaped = @()
-    foreach ($log in (Join-Path $DimonLogDir "$Name.log"), (Join-Path $DimonLogDir "$Name.err.log")) {
-        [IO.File]::WriteAllText($log, "")
-        $escaped += [Management.Automation.WildcardPattern]::Escape($log)
-    }
-    $out, $err = $escaped
-    # -WorkingDirectory, unlike the redirects, is taken literally.
-    return Start-Process -FilePath $File -ArgumentList $Arguments -WorkingDirectory $DimonRepo `
-        -WindowStyle Hidden -RedirectStandardOutput $out -RedirectStandardError $err -PassThru
+    # Start-Process resolves its paths as wildcards and fails for folders such
+    # as "dimon [1]". ProcessStartInfo takes every path literally; cmd.exe does
+    # the log redirection, with all paths quoted.
+    $out = Join-Path $DimonLogDir "$Name.log"
+    $err = Join-Path $DimonLogDir "$Name.err.log"
+    $info = New-Object System.Diagnostics.ProcessStartInfo
+    $info.FileName = $env:ComSpec
+    $info.Arguments = "/d /s /c `"`"$File`" $Arguments > `"$out`" 2> `"$err`"`""
+    $info.WorkingDirectory = $DimonRepo
+    $info.UseShellExecute = $false
+    $info.CreateNoWindow = $true
+    return [System.Diagnostics.Process]::Start($info)
 }
 
 function Show-LogTail([string]$Name) {
