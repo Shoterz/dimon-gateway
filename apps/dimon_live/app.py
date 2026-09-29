@@ -176,6 +176,7 @@ def create_app(
         endpoint_silence_seconds=float(os.environ.get("DIMON_VOICE_ENDPOINT_SILENCE_SECONDS", "1.4")),
         pause_seconds=float(os.environ.get("DIMON_VOICE_PAUSE_SECONDS", "0.3")),
         speech_threshold=float(os.environ.get("DIMON_VOICE_SPEECH_THRESHOLD", "0.015")),
+        evidence_dir=Path(os.environ.get("DIMON_VOICE_EVIDENCE_DIR", "runtime/evidence")),
     )
     application.state.speech_service = speech_service or SpeechService(
         base_url=os.environ.get("DIMON_KOKORO_URL", "http://127.0.0.1:3001"),
@@ -265,6 +266,19 @@ def create_app(
             "trace": [{"stage": reason_code}],
             "state": context.database.get_state(),
         }
+
+    @application.get("/api/audit")
+    async def audit_trail(request: Request, response: Response, limit: int = 100):
+        context = resolve(request, response)
+        return context.database.audit_overview(limit=max(1, min(limit, 500)))
+
+    @application.get("/api/audit/receipts/{receipt_id}")
+    async def audit_receipt_bundle(request: Request, response: Response, receipt_id: str):
+        context = resolve(request, response)
+        bundle = context.database.audit_bundle(receipt_id)
+        if bundle is None:
+            raise HTTPException(status_code=404, detail="RECEIPT_NOT_FOUND")
+        return bundle
 
     @application.get("/api/profile")
     async def customer_profile(request: Request, response: Response):
@@ -455,8 +469,10 @@ def create_app(
             await websocket.close(code=1008)
             return
 
-        async def dispatch(text: str):
-            result = service_for(context).process(str(uuid4()), text)
+        async def dispatch(text: str, evidence: dict):
+            result = service_for(context).process(
+                str(uuid4()), text, source="voice", voice=evidence
+            )
             return await attach_speech(result, context)
 
         await application.state.voice_bridge.handle(websocket, context, dispatch)

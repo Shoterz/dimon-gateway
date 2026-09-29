@@ -431,6 +431,18 @@ function confirmOnDevice(challenge, signerKind) {
   });
 }
 
+// Link to the hash-chained audit bundle: stored receipt, the device
+// signature re-verified now, and every event from request to ledger commit.
+function appendEvidenceLink(receiptId) {
+  const link = document.createElement("a");
+  link.href = `/api/audit/receipts/${encodeURIComponent(receiptId)}`;
+  link.target = "_blank";
+  link.rel = "noopener";
+  link.className = "evidence-link";
+  link.textContent = "View signed audit evidence";
+  ui.outcomeDetail.append(" ", link);
+}
+
 function renderApprovalRefusal(reasonCode, detail) {
   setOutcome("blocked", "!", "Approval not signed", reasonCode.replaceAll("_", " ").toLowerCase(), detail);
   ui.commitStatus.className = "commit-status blocked";
@@ -545,6 +557,7 @@ function renderResult(result, elapsedMs) {
   ui.elapsedLabel.textContent = `${elapsedMs} ms end to end`;
   if (result.outcome === "EXECUTED_SYNTHETIC_TRANSFER") {
     setOutcome("success", "✓", "Synthetic transfer settled", "The ledger moved exactly once.", `${formatSgd(result.amount_minor)} moved to ${result.resolved_action.recipient_display_name}. The database recorded two balanced entries.`);
+    if (result.receipt?.receipt_id) appendEvidenceLink(result.receipt.receipt_id);
   } else if (result.outcome === "EXECUTED_SYNTHETIC_BATCH") {
     const itemCount = (result.resolved_actions || []).length;
     setOutcome("success", "✓", "Synthetic batch settled", "The complete plan moved exactly once.", `${formatSgd(result.amount_minor)} was split across ${itemCount} transfers in one atomic database transaction.`);

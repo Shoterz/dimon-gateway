@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import inspect
 import json
 import math
 import struct
+import wave
 from pathlib import Path
 from typing import Any
 from typing import Awaitable, Callable
@@ -386,7 +388,9 @@ class VoiceBridge:
         endpoint_silence_seconds: float = 1.40,
         pause_seconds: float = 0.30,
         speech_threshold: float = 0.015,
+        evidence_dir: Path | None = None,
     ):
+        self.evidence_dir = Path(evidence_dir) if evidence_dir is not None else None
         self.recognizer = recognizer
         self.lifecycle = lifecycle
         self.lease = lease or VoiceLease()
@@ -395,6 +399,27 @@ class VoiceBridge:
         self.endpoint_silence_seconds = float(endpoint_silence_seconds)
         self.pause_seconds = float(pause_seconds)
         self.speech_threshold = float(speech_threshold)
+
+    def _voice_evidence(self, audio: bytes, transcript: str) -> dict[str, Any]:
+        """Audit evidence for one utterance: the raw audio's hash and, when an
+        evidence directory is configured, the audio itself as a 16 kHz WAV."""
+
+        evidence: dict[str, Any] = {
+            "transcript": transcript,
+            "audio_sha256": hashlib.sha256(audio).hexdigest(),
+            "audio_seconds": round(len(audio) / 4 / 16_000, 2),
+            "encoding": "float32le/16000",
+        }
+        if self.evidence_dir is not None:
+            self.evidence_dir.mkdir(parents=True, exist_ok=True)
+            path = self.evidence_dir / f"{evidence['audio_sha256']}.wav"
+            with wave.open(str(path), "wb") as wav_file:
+                wav_file.setnchannels(1)
+                wav_file.setsampwidth(2)
+                wav_file.setframerate(16_000)
+                wav_file.writeframes(float32le_to_pcm16(audio))
+            evidence["audio_file"] = path.name
+        return evidence
 
     def validate_audio(self, chunk: bytes, current_bytes: int = 0) -> None:
         if not isinstance(chunk, bytes) or len(chunk) == 0 or len(chunk) % 4:
@@ -479,7 +504,10 @@ class VoiceBridge:
             else:
                 transcript = await self.recognizer.transcribe(audio, partial)
             await websocket.send_json({"type": "transcript_final", "text": transcript})
-            result = action_callback(transcript)
+            if len(inspect.signature(action_callback).parameters) >= 2:
+                result = action_callback(transcript, self._voice_evidence(audio, transcript))
+            else:
+                result = action_callback(transcript)
             if inspect.isawaitable(result):
                 result = await result
             await websocket.send_json({"type": "action_result", "result": result})

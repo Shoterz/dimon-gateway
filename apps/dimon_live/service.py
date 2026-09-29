@@ -127,8 +127,20 @@ class ActionService:
         self.extractor = extractor
         self.paynow_directory = SyntheticPayNowDirectory(database)
 
-    def process(self, request_id: str, text: str) -> dict[str, Any]:
-        return self._with_validation(self._process(request_id, text))
+    def process(
+        self,
+        request_id: str,
+        text: str,
+        *,
+        source: str = "typed",
+        voice: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        response = self._with_validation(self._process(request_id, text))
+        if not response.get("idempotent_replay"):
+            self.database.audit_request(
+                "REQUEST_DRAFTED", request_id, text, response, source=source, voice=voice
+            )
+        return response
 
     def _with_validation(self, response: dict[str, Any]) -> dict[str, Any]:
         """Attach the independent validation agent's verdict to every draft.
@@ -990,7 +1002,7 @@ class ActionService:
     ) -> dict[str, Any]:
         verdict = input_firewall.inspect(text, source="clarification_reply")
         if not verdict.allowed:
-            return {
+            response = {
                 "outcome": "BLOCKED",
                 "request_id": request_id,
                 "reason_code": "PROMPT_INJECTION_BLOCKED",
@@ -1001,11 +1013,21 @@ class ActionService:
                 ],
                 "state": self.database.get_state(),
             }
-        return self._with_validation(
-            self._respond_to_clarification(
-                clarification_id, request_id, text, user_id=user_id
+        else:
+            response = self._with_validation(
+                self._respond_to_clarification(
+                    clarification_id, request_id, text, user_id=user_id
+                )
             )
-        )
+        if not response.get("idempotent_replay"):
+            self.database.audit_request(
+                "CLARIFICATION_ANSWERED",
+                request_id,
+                text,
+                {**response, "clarification_id": clarification_id},
+                source="clarification_reply",
+            )
+        return response
 
     def _respond_to_clarification(
         self,
@@ -1054,7 +1076,30 @@ class ActionService:
             "state": self.database.get_state(),
         }
 
-    def approve(
+    def _audit_refusal(self, receipt_id: str, receipt_digest: str, result: dict[str, Any]) -> dict[str, Any]:
+        if result.get("outcome") in ("BLOCKED", "FAILED"):
+            self.database.audit_event(
+                "APPROVAL_REFUSED",
+                {
+                    "receipt_digest": receipt_digest,
+                    "outcome": result["outcome"],
+                    "reason_code": result.get("reason_code"),
+                },
+                receipt_id=receipt_id,
+            )
+        return result
+
+    def approve(self, receipt_id: str, receipt_digest: str, **kwargs: Any) -> dict[str, Any]:
+        return self._audit_refusal(
+            receipt_id, receipt_digest, self._approve(receipt_id, receipt_digest, **kwargs)
+        )
+
+    def approve_batch(self, receipt_id: str, receipt_digest: str, **kwargs: Any) -> dict[str, Any]:
+        return self._audit_refusal(
+            receipt_id, receipt_digest, self._approve_batch(receipt_id, receipt_digest, **kwargs)
+        )
+
+    def _approve(
         self,
         receipt_id: str,
         receipt_digest: str,
@@ -1108,7 +1153,7 @@ class ActionService:
             "state": self.database.get_state(),
         }
 
-    def approve_batch(
+    def _approve_batch(
         self,
         receipt_id: str,
         receipt_digest: str,

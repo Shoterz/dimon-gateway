@@ -14,6 +14,7 @@ import sqlite3
 from datetime import datetime, timezone
 from typing import Any
 
+from . import audit_log
 from .approval_gateway import (
     CHALLENGE_TTL,
     CREDENTIAL_KINDS,
@@ -128,6 +129,18 @@ def issue_challenge(
             row["created_at"],
         ),
     )
+    audit_log.append(
+        connection,
+        "CHALLENGE_ISSUED",
+        {
+            "challenge_id": row["challenge_id"],
+            "purpose": purpose,
+            "receipt_digest": receipt_digest,
+            "expires_at": row["expires_at"],
+        },
+        now=now,
+        receipt_id=receipt_id,
+    )
     return {
         "challenge_id": row["challenge_id"],
         "challenge": b64url_encode(_challenge_bytes(row)),
@@ -222,6 +235,18 @@ def register_credential(
         )
     except sqlite3.IntegrityError as exc:
         raise ApprovalRejected("CREDENTIAL_ALREADY_REGISTERED") from exc
+    audit_log.append(
+        connection,
+        "CREDENTIAL_ENROLLED",
+        {
+            "credential_id": credential_id,
+            "kind": credential_kind,
+            "algorithm": algorithm,
+            "rp_id": context.rp_id,
+            "public_key_spki": _b64(public_key_spki),
+        },
+        now=now,
+    )
     return {"credential_id": credential_id, "kind": credential_kind}
 
 
@@ -320,6 +345,13 @@ def consume_approval(
         )
         """,
         record,
+    )
+    audit_log.append(
+        connection,
+        "DEVICE_SIGNATURE_VERIFIED",
+        {key: value for key, value in record.items() if key != "user_id"},
+        now=now,
+        receipt_id=receipt_id,
     )
     return {
         "signature_id": record["signature_id"],

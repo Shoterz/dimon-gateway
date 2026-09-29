@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import sqlite3
 import uuid
@@ -23,6 +24,9 @@ from .name_resolution import (
     rank_name_candidates,
     rank_phonetic_candidates,
 )
+from . import audit_log
+from .approval_gateway import approval_challenge, b64url_encode, verify_signature
+from .audit_log import AUDIT_SCHEMA
 from .risk_policy import (
     POLICY_SCHEMA,
     PolicyRejected,
@@ -387,6 +391,7 @@ class Database:
             connection.executescript(SIGNING_SCHEMA)
             connection.executescript(VALIDATION_SCHEMA)
             connection.executescript(POLICY_SCHEMA)
+            connection.executescript(AUDIT_SCHEMA)
             seed_profile(connection, DEMO_USER_ID, self._clock())
             self._apply_v2_migrations(connection)
             count = connection.execute("SELECT COUNT(*) FROM accounts").fetchone()[0]
@@ -539,6 +544,8 @@ class Database:
                 connection.execute("DELETE FROM beneficiaries")
                 connection.execute("DELETE FROM accounts")
                 self._insert_seed(connection)
+                # The audit trail is append-only and survives a demo reset.
+                audit_log.append(connection, "DEMO_RESET", {"seed": "restored"}, now=self._clock())
                 connection.commit()
             except Exception:
                 connection.rollback()
@@ -1188,6 +1195,27 @@ class Database:
                 }
                 if approval is not None:
                     response["approval"] = dict(approval)
+                audit_log.append(
+                    connection,
+                    "LEDGER_COMMITTED",
+                    {
+                        "batch_transaction_id": batch_transaction_id,
+                        "receipt_digest": row["receipt_digest"],
+                        "source_account_id": row["source_account_id"],
+                        "total_minor": row["total_minor"],
+                        "items": [
+                            {
+                                "destination_account_id": item["destination_account_id"],
+                                "amount_minor": item["amount_minor"],
+                            }
+                            for item in item_dicts
+                        ],
+                        "signature_id": (approval or {}).get("signature_id"),
+                    },
+                    now=approved_at,
+                    request_id=row["request_id"],
+                    receipt_id=receipt_id,
+                )
                 connection.execute(
                     """
                     UPDATE action_attempts
@@ -2055,6 +2083,174 @@ class Database:
                 if datetime.fromisoformat(row["expires_at"]) > current
             ]
 
+    def audit_event(
+        self,
+        event_type: str,
+        payload: Mapping[str, Any],
+        *,
+        request_id: str | None = None,
+        receipt_id: str | None = None,
+    ) -> None:
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            audit_log.append(
+                connection,
+                event_type,
+                dict(payload),
+                now=self._clock(),
+                request_id=request_id,
+                receipt_id=receipt_id,
+            )
+            connection.commit()
+
+    def audit_request(
+        self,
+        event_type: str,
+        request_id: str,
+        text: str,
+        response: Mapping[str, Any],
+        *,
+        source: str,
+        voice: Mapping[str, Any] | None = None,
+    ) -> None:
+        """Record what the user said and everything drafted from it."""
+
+        with self._connect() as connection:
+            attempt = connection.execute(
+                "SELECT raw_model_output, validated_intent_json FROM action_attempts WHERE request_id = ?",
+                (request_id,),
+            ).fetchone()
+        payload: dict[str, Any] = {
+            "source": source,
+            "text": text,
+            "outcome": response.get("outcome"),
+            "reason_code": response.get("reason_code"),
+            "firewall": response.get("firewall"),
+            "trace": [step.get("stage") for step in response.get("trace") or ()],
+            "raw_model_output": attempt["raw_model_output"] if attempt else None,
+            "validated_intent": (
+                json.loads(attempt["validated_intent_json"])
+                if attempt and attempt["validated_intent_json"]
+                else None
+            ),
+            "receipts": [
+                {
+                    "receipt_id": choice.get("receipt_id"),
+                    "receipt_digest": choice.get("receipt_digest"),
+                    "recipient_display_name": choice.get("recipient_display_name"),
+                    "amount_minor": choice.get("amount_minor"),
+                }
+                for choice in response.get("receipt_choices") or ()
+            ],
+            "batch_receipt": (
+                {
+                    "receipt_id": response["batch_receipt"].get("receipt_id"),
+                    "receipt_digest": response["batch_receipt"].get("receipt_digest"),
+                    "total_minor": response["batch_receipt"].get("total_minor"),
+                }
+                if response.get("batch_receipt")
+                else None
+            ),
+            "discrepancies": response.get("discrepancies"),
+            "policy": response.get("policy"),
+        }
+        if voice:
+            payload["voice"] = dict(voice)
+        self.audit_event(event_type, payload, request_id=request_id)
+
+    def audit_overview(self, *, limit: int = 100) -> dict[str, Any]:
+        with self._connect() as connection:
+            return {
+                "chain": audit_log.verify_chain(connection),
+                "events": audit_log.events(connection, limit=limit),
+            }
+
+    def audit_bundle(self, receipt_id: str) -> dict[str, Any] | None:
+        """Everything a regulator needs for one receipt, re-verified now."""
+
+        with self._connect() as connection:
+            kind = "single"
+            receipt = connection.execute(
+                "SELECT * FROM review_receipts WHERE receipt_id = ?", (receipt_id,)
+            ).fetchone()
+            if receipt is None:
+                kind = "batch"
+                receipt = connection.execute(
+                    "SELECT * FROM batch_review_receipts WHERE receipt_id = ?", (receipt_id,)
+                ).fetchone()
+            if receipt is None:
+                return None
+            request_ids = [receipt["request_id"]]
+            origin = connection.execute(
+                "SELECT request_id FROM clarification_sessions WHERE response_request_id = ?",
+                (receipt["request_id"],),
+            ).fetchone()
+            if origin is not None:
+                request_ids.append(origin["request_id"])
+            recomputed = digest_canonical(receipt["canonical_json"])
+            signatures = []
+            for signature in connection.execute(
+                """
+                SELECT s.*, c.public_key_spki, c.algorithm, ch.nonce
+                FROM approval_signatures s
+                JOIN signing_credentials c ON c.credential_id = s.credential_id
+                JOIN approval_challenges ch ON ch.challenge_id = s.challenge_id
+                WHERE s.receipt_id = ?
+                """,
+                (receipt_id,),
+            ):
+                client_data = base64.b64decode(signature["client_data_json"])
+                expected_challenge = b64url_encode(
+                    approval_challenge(
+                        signature["purpose"],
+                        signature["challenge_id"],
+                        signature["receipt_digest"],
+                        signature["nonce"],
+                    )
+                )
+                try:
+                    verify_signature(
+                        base64.b64decode(signature["public_key_spki"]),
+                        signature["algorithm"],
+                        signature["credential_kind"],
+                        base64.b64decode(signature["authenticator_data"]),
+                        client_data,
+                        base64.b64decode(signature["signature"]),
+                    )
+                    signature_valid = True
+                except ApprovalRejected:
+                    signature_valid = False
+                signatures.append(
+                    {
+                        "signature_id": signature["signature_id"],
+                        "credential_id": signature["credential_id"],
+                        "credential_kind": signature["credential_kind"],
+                        "verified_at": signature["verified_at"],
+                        "public_key_spki": signature["public_key_spki"],
+                        "client_data_json": signature["client_data_json"],
+                        "authenticator_data": signature["authenticator_data"],
+                        "signature": signature["signature"],
+                        "signature_valid_now": signature_valid,
+                        "binds_this_receipt": (
+                            signature["receipt_digest"] == receipt["receipt_digest"]
+                            and json.loads(client_data).get("challenge") == expected_challenge
+                        ),
+                    }
+                )
+            return {
+                "receipt_kind": kind,
+                "receipt_id": receipt_id,
+                "status": receipt["status"],
+                "canonical_json": json.loads(receipt["canonical_json"]),
+                "receipt_digest": receipt["receipt_digest"],
+                "digest_matches_canonical_json": recomputed == receipt["receipt_digest"],
+                "signatures": signatures,
+                "chain": audit_log.verify_chain(connection),
+                "events": audit_log.events(
+                    connection, receipt_id=receipt_id, request_ids=tuple(request_ids)
+                ),
+            }
+
     def audit_receipt(
         self, kind: str, receipt_id: str, *, now: datetime | None = None
     ) -> dict[str, Any]:
@@ -2535,6 +2731,22 @@ class Database:
         }
         if approval is not None:
             response["approval"] = dict(approval)
+        audit_log.append(
+            connection,
+            "LEDGER_COMMITTED",
+            {
+                "transaction_id": transaction_id,
+                "receipt_digest": row["receipt_digest"],
+                "source_account_id": row["source_account_id"],
+                "destination_account_id": destination_account_id,
+                "amount_minor": row["amount_minor"],
+                "currency": row["currency"],
+                "signature_id": (approval or {}).get("signature_id"),
+            },
+            now=now,
+            request_id=row["request_id"],
+            receipt_id=row["receipt_id"],
+        )
         connection.execute(
             """
             UPDATE action_attempts

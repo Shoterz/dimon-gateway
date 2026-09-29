@@ -12,6 +12,7 @@ import secrets
 import sqlite3
 from datetime import datetime, timezone
 
+from . import audit_log
 from .validation_agent import (
     DirectoryEntry,
     DraftItem,
@@ -133,5 +134,12 @@ def record_validation(
             json.dumps(report.to_dict(), ensure_ascii=False, sort_keys=True),
             now.astimezone(timezone.utc).isoformat(),
         ),
+    )
+    audit_log.append(
+        connection,
+        f"VALIDATION_{stage}",
+        {"receipt_kind": kind, "receipt_digest": row["receipt_digest"], **report.to_dict()},
+        now=now,
+        receipt_id=receipt_id,
     )
     return report
