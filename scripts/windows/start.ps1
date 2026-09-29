@@ -90,8 +90,8 @@ function Start-Hidden([string]$Name, [string]$File, [string]$Arguments) {
         $escaped += [Management.Automation.WildcardPattern]::Escape($log)
     }
     $out, $err = $escaped
-    $cwd = [Management.Automation.WildcardPattern]::Escape($DimonRepo)
-    return Start-Process -FilePath $File -ArgumentList $Arguments -WorkingDirectory $cwd `
+    # -WorkingDirectory, unlike the redirects, is taken literally.
+    return Start-Process -FilePath $File -ArgumentList $Arguments -WorkingDirectory $DimonRepo `
         -WindowStyle Hidden -RedirectStandardOutput $out -RedirectStandardError $err -PassThru
 }
 
