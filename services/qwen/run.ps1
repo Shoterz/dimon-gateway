@@ -37,3 +37,5 @@ if ($Check) {
     --batch-size 512 `
     --ubatch-size 128 `
     --context-shift
+
+exit $LASTEXITCODE
