@@ -2,6 +2,8 @@ param(
     [switch]$Check
 )
 
+. (Join-Path $PSScriptRoot "..\..\scripts\windows\Import-DimonEnv.ps1")
+
 if (-not $env:DIMON_QWEN_MODEL_PATH) {
     Write-Error "DIMON_QWEN_MODEL_PATH is required"
     exit 1

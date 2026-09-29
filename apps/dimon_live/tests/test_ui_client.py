@@ -42,6 +42,7 @@ class ReceiptApprovalClientTests(unittest.TestCase):
             capture_output=True,
             check=False,
             text=True,
+            encoding="utf-8",
         )
 
         self.assertEqual(completed.returncode, 0, completed.stderr)
@@ -77,6 +78,7 @@ class ReceiptApprovalClientTests(unittest.TestCase):
             capture_output=True,
             check=False,
             text=True,
+            encoding="utf-8",
         )
 
         self.assertEqual(completed.returncode, 0, completed.stderr)
@@ -102,6 +104,7 @@ class ReceiptApprovalClientTests(unittest.TestCase):
             capture_output=True,
             check=False,
             text=True,
+            encoding="utf-8",
         )
 
         self.assertEqual(completed.returncode, 0, completed.stderr)
@@ -132,6 +135,7 @@ class ReceiptApprovalClientTests(unittest.TestCase):
             capture_output=True,
             check=False,
             text=True,
+            encoding="utf-8",
         )
 
         self.assertEqual(completed.returncode, 0, completed.stderr)
@@ -156,6 +160,7 @@ class ReceiptApprovalClientTests(unittest.TestCase):
             capture_output=True,
             check=False,
             text=True,
+            encoding="utf-8",
         )
 
         self.assertEqual(completed.returncode, 0, completed.stderr)
@@ -193,6 +198,7 @@ class ReceiptApprovalClientTests(unittest.TestCase):
             capture_output=True,
             check=False,
             text=True,
+            encoding="utf-8",
         )
 
         self.assertEqual(completed.returncode, 0, completed.stderr)
@@ -247,6 +253,7 @@ class ReceiptApprovalClientTests(unittest.TestCase):
             capture_output=True,
             check=False,
             text=True,
+            encoding="utf-8",
         )
 
         self.assertEqual(completed.returncode, 0, completed.stderr)
@@ -302,6 +309,7 @@ class ReceiptApprovalClientTests(unittest.TestCase):
             capture_output=True,
             check=False,
             text=True,
+            encoding="utf-8",
         )
 
         self.assertEqual(completed.returncode, 0, completed.stderr)
@@ -349,6 +357,7 @@ class ReceiptApprovalClientTests(unittest.TestCase):
             capture_output=True,
             check=False,
             text=True,
+            encoding="utf-8",
         )
 
         self.assertEqual(completed.returncode, 0, completed.stderr)

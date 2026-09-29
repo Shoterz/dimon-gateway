@@ -1,5 +1,6 @@
 import json
 import sqlite3
+from contextlib import closing
 import tempfile
 import unittest
 from pathlib import Path
@@ -118,11 +119,11 @@ class ActionServiceTests(unittest.TestCase):
         ]
 
     def receipt_count(self):
-        with sqlite3.connect(self.database.path) as connection:
+        with closing(sqlite3.connect(self.database.path)) as connection, connection:
             return connection.execute("SELECT COUNT(*) FROM review_receipts").fetchone()[0]
 
     def batch_receipt_count(self):
-        with sqlite3.connect(self.database.path) as connection:
+        with closing(sqlite3.connect(self.database.path)) as connection, connection:
             return connection.execute(
                 "SELECT COUNT(*) FROM batch_review_receipts"
             ).fetchone()[0]
@@ -654,7 +655,7 @@ class ActionServiceTests(unittest.TestCase):
                     "PayNow 8695 2933 ten dollars for flowers",
                 )
                 choice = pending["receipt_choices"][0]
-                with sqlite3.connect(self.database.path) as connection:
+                with closing(sqlite3.connect(self.database.path)) as connection, connection:
                     if receipt_change:
                         connection.execute(
                             f"UPDATE review_receipts SET {receipt_change} WHERE receipt_id = ?",
@@ -682,7 +683,7 @@ class ActionServiceTests(unittest.TestCase):
         )
         choice = pending["receipt_choices"][0]
         before = self.balances()
-        with sqlite3.connect(self.database.path) as connection:
+        with closing(sqlite3.connect(self.database.path)) as connection, connection:
             connection.execute(
                 """
                 UPDATE beneficiaries SET destination_account_id = ?
@@ -705,7 +706,7 @@ class ActionServiceTests(unittest.TestCase):
             REQUEST_ID,
             "PayNow 8695 2933 for flowers",
         )
-        with sqlite3.connect(self.database.path) as connection:
+        with closing(sqlite3.connect(self.database.path)) as connection, connection:
             connection.execute(
                 "UPDATE paynow_lookups SET expires_at = '2020-01-01T00:00:00+00:00'"
             )
@@ -1055,7 +1056,7 @@ class ActionServiceTests(unittest.TestCase):
             "I owe Alicia Powell 5 dollars, help me resolve it.",
         )
         choice = pending["receipt_choices"][0]
-        with sqlite3.connect(self.database.path) as connection:
+        with closing(sqlite3.connect(self.database.path)) as connection, connection:
             connection.execute(
                 """
                 UPDATE review_receipts SET status = 'EXPIRED'
@@ -1089,7 +1090,7 @@ class ActionServiceTests(unittest.TestCase):
         )
 
         self.assertEqual(result["reason_code"], "INSUFFICIENT_FUNDS")
-        with sqlite3.connect(self.database.path) as connection:
+        with closing(sqlite3.connect(self.database.path)) as connection, connection:
             receipt_count = connection.execute(
                 "SELECT COUNT(*) FROM review_receipts"
             ).fetchone()[0]

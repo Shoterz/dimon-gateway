@@ -56,6 +56,22 @@ variable, fixture failure selector, and stable failure code.
 Mode selection changes inference wiring only. Deterministic policy, receipts,
 approvals, and each developer's SQLite ledger remain local in every mode.
 
+### Local mode on Windows (any GPU vendor)
+
+Windows hosts run `local` mode natively: Qwen on a Vulkan `llama-server`,
+speech recognition on whisper.cpp (`DIMON_STT_BACKEND=whisper_cpp`), and
+Kokoro on CPU PyTorch.
+
+```powershell
+.\scripts\windows\setup-local-host.ps1   # downloads runtimes, prints .env values
+# fill in the model paths it prints in apps\dimon_live\.env, then:
+.\scripts\windows\start-local.ps1        # starts every service and the app
+```
+
+The Windows launchers read `apps\dimon_live\.env`; explicit shell variables
+still win. Use `dimon-serve`, not `dimon-dev`, for local mode: `dimon-dev`
+forces fixture inference unless the shell sets `DIMON_INFERENCE_MODE`.
+
 ## Model boundary
 
 The Git repository contains integration code, launch definitions, manifests,

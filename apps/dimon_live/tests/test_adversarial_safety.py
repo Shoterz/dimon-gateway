@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import json
 import sqlite3
+from contextlib import closing
 import tempfile
 import unittest
 from pathlib import Path
@@ -80,7 +81,7 @@ class AdversarialSafetyTests(unittest.TestCase):
         }
 
     def authorization_count(self):
-        with sqlite3.connect(self.database.path) as connection:
+        with closing(sqlite3.connect(self.database.path)) as connection, connection:
             return connection.execute(
                 "SELECT COUNT(*) FROM authorization_records"
             ).fetchone()[0]

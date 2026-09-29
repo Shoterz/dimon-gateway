@@ -14,26 +14,53 @@
 
 param(
     [string]$InstallDir = "$HOME\dimon-local-host",
-    [string]$LlamaCppRelease = "https://github.com/ggml-org/llama.cpp/releases/latest/download/llama-bin-win-vulkan-x64.zip",
-    [string]$WhisperCppRelease = "https://github.com/ggml-org/whisper.cpp/releases/latest/download/whisper-bin-x64.zip"
+    # Release asset names embed the build tag (llama-b11255-bin-win-vulkan-x64.zip)
+    # and the repos' "latest" releases carry no Windows assets, so assets are
+    # resolved by pattern against the most recent releases instead of a fixed URL.
+    [string]$LlamaCppAssetPattern = '^llama-b\d+-bin-win-vulkan-x64\.zip$',
+    # whisper.cpp publishes no Windows Vulkan build; this is the CPU build.
+    [string]$WhisperCppAssetPattern = '^whisper-bin-x64\.zip$'
 )
 
 $ErrorActionPreference = "Stop"
 
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
 
-function Get-AndExtract($Url, $Name) {
+function Find-ReleaseAsset($Repo, $Pattern) {
+    $releases = Invoke-RestMethod -Uri "https://api.github.com/repos/$Repo/releases?per_page=10" `
+        -Headers @{ "User-Agent" = "dimon-setup-local-host" }
+    foreach ($release in $releases) {
+        $asset = $release.assets | Where-Object { $_.name -match $Pattern } | Select-Object -First 1
+        if ($asset) {
+            return $asset.browser_download_url
+        }
+    }
+    throw "No $Repo release asset matches $Pattern"
+}
+
+function Get-AndExtract($Repo, $Pattern, $Name) {
+    $url = Find-ReleaseAsset $Repo $Pattern
     $zipPath = Join-Path $InstallDir "$Name.zip"
     $destDir = Join-Path $InstallDir $Name
-    Write-Output "Downloading $Name from $Url ..."
-    Invoke-WebRequest -Uri $Url -OutFile $zipPath
+    # Write-Host, not Write-Output: pipeline output would become part of the
+    # function's return value.
+    Write-Host "Downloading $Name from $url ..."
+    Invoke-WebRequest -Uri $url -OutFile $zipPath
     Expand-Archive -Path $zipPath -DestinationPath $destDir -Force
     Remove-Item $zipPath
     return $destDir
 }
 
-$llamaDir = Get-AndExtract $LlamaCppRelease "llama-cpp-vulkan"
-$whisperDir = Get-AndExtract $WhisperCppRelease "whisper-cpp-vulkan"
+function Find-Executable($Dir, $Name) {
+    $exe = Get-ChildItem -Path $Dir -Filter $Name -Recurse -File | Select-Object -First 1
+    if (-not $exe) {
+        throw "$Name not found under $Dir"
+    }
+    return $exe.FullName
+}
+
+$llamaDir = Get-AndExtract "ggml-org/llama.cpp" $LlamaCppAssetPattern "llama-cpp-vulkan"
+$whisperDir = Get-AndExtract "ggml-org/whisper.cpp" $WhisperCppAssetPattern "whisper-cpp"
 
 Write-Output ""
 Write-Output "=== GPU / Vulkan check ==="
@@ -49,8 +76,8 @@ if ($vulkaninfo) {
     Write-Output "vulkaninfo not found on PATH -- can't confirm GPU driver presence. Qwen/STT will still run (CPU fallback) if no Vulkan device is available at launch time."
 }
 
-$llamaServer = Join-Path $llamaDir "llama-server.exe"
-$whisperCli = Join-Path $whisperDir "whisper-cli.exe"
+$llamaServer = Find-Executable $llamaDir "llama-server.exe"
+$whisperCli = Find-Executable $whisperDir "whisper-cli.exe"
 
 Write-Output ""
 Write-Output "=== Add these to apps/dimon_live/.env ==="
@@ -64,4 +91,7 @@ Write-Output ""
 Write-Output "Then start each service in its own terminal:"
 Write-Output "  services\qwen\run.ps1"
 Write-Output "  services\whisper_cpp\run.ps1"
-Write-Output "  uv run dimon-dev"
+Write-Output "  services\kokoro\run.ps1   (needs the DIMON_KOKORO_* values; see services\kokoro\README.md)"
+# dimon-dev forces fixture mode unless the shell sets DIMON_INFERENCE_MODE;
+# dimon-serve honours the value from .env.
+Write-Output "  uv run dimon-serve"

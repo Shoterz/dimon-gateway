@@ -1,6 +1,7 @@
 import dataclasses
 import json
 import sqlite3
+from contextlib import closing
 import tempfile
 import unittest
 from concurrent.futures import ThreadPoolExecutor
@@ -146,7 +147,7 @@ class DatabaseSeedTests(unittest.TestCase):
         )
 
     def count_rows(self, table):
-        with sqlite3.connect(self.db_path) as connection:
+        with closing(sqlite3.connect(self.db_path)) as connection, connection:
             return connection.execute(
                 f"SELECT COUNT(*) FROM {table}"
             ).fetchone()[0]
@@ -255,7 +256,7 @@ class DatabaseSeedTests(unittest.TestCase):
         self.database.execute_policy_transfer(self.command(amount_minor=500), now=FIXED_NOW)
         self.database.initialize()
         self.assertEqual(self.count_rows("ledger_transactions"), 1)
-        with sqlite3.connect(self.db_path) as connection:
+        with closing(sqlite3.connect(self.db_path)) as connection, connection:
             tables = {
                 row[0]
                 for row in connection.execute(
@@ -291,7 +292,7 @@ class DatabaseSeedTests(unittest.TestCase):
                 )
                 receipt = pending["batch_receipt"]
                 before = self.database.get_state()
-                with sqlite3.connect(self.db_path) as connection:
+                with closing(sqlite3.connect(self.db_path)) as connection, connection:
                     connection.execute(
                         f"UPDATE batch_review_receipts SET {expression} WHERE receipt_id = ?",
                         (receipt["receipt_id"],),
@@ -314,7 +315,7 @@ class DatabaseSeedTests(unittest.TestCase):
             now=FIXED_NOW,
         )
         receipt = pending["batch_receipt"]
-        with sqlite3.connect(self.db_path) as connection:
+        with closing(sqlite3.connect(self.db_path)) as connection, connection:
             connection.execute(
                 "UPDATE beneficiaries SET destination_account_id = ? WHERE beneficiary_id = ?",
                 ("acct_john_tan_01", "beneficiary_john_smith_01"),
@@ -334,7 +335,7 @@ class DatabaseSeedTests(unittest.TestCase):
             now=FIXED_NOW,
         )
         receipt = pending["batch_receipt"]
-        with sqlite3.connect(self.db_path) as connection:
+        with closing(sqlite3.connect(self.db_path)) as connection, connection:
             connection.execute(
                 "UPDATE accounts SET balance_minor = 500 WHERE account_id = 'acct_savings_01'"
             )
@@ -532,7 +533,7 @@ class DatabaseSeedTests(unittest.TestCase):
 
         legacy.initialize()
 
-        with sqlite3.connect(legacy_path) as connection:
+        with closing(sqlite3.connect(legacy_path)) as connection, connection:
             beneficiary_columns = {
                 row[1] for row in connection.execute("PRAGMA table_info(beneficiaries)")
             }
@@ -569,7 +570,7 @@ class DatabaseSeedTests(unittest.TestCase):
         self.assertEqual(response["outcome"], "EXECUTED_SYNTHETIC_TRANSFER")
 
     def scalar(self, sql):
-        with sqlite3.connect(self.db_path) as connection:
+        with closing(sqlite3.connect(self.db_path)) as connection, connection:
             return connection.execute(sql).fetchone()[0]
 
     def command(self, *, amount_minor=5000):
@@ -843,7 +844,7 @@ class DatabaseSeedTests(unittest.TestCase):
             with self.subTest(assignment=assignment):
                 self.database.reset()
                 choice = self.create_pending_alicia()["receipt_choices"][0]
-                with sqlite3.connect(self.db_path) as connection:
+                with closing(sqlite3.connect(self.db_path)) as connection, connection:
                     connection.execute(
                         f"UPDATE review_receipts SET {assignment} WHERE receipt_id = ?",
                         (*values, choice["receipt_id"]),
@@ -857,7 +858,7 @@ class DatabaseSeedTests(unittest.TestCase):
 
     def test_balance_is_rechecked_at_approval_time(self):
         choice = self.create_pending_alicia()["receipt_choices"][0]
-        with sqlite3.connect(self.db_path) as connection:
+        with closing(sqlite3.connect(self.db_path)) as connection, connection:
             connection.execute(
                 """
                 UPDATE accounts SET balance_minor = 0
@@ -877,7 +878,7 @@ class DatabaseSeedTests(unittest.TestCase):
     def test_entry_failure_rolls_back_authorization_balance_and_receipt(self):
         choice = self.create_pending_alicia()["receipt_choices"][0]
         before = self.database.get_state()["accounts"]
-        with sqlite3.connect(self.db_path) as connection:
+        with closing(sqlite3.connect(self.db_path)) as connection, connection:
             connection.executescript(
                 """
                 CREATE TRIGGER force_receipt_entry_failure
@@ -911,7 +912,7 @@ class DatabaseSeedTests(unittest.TestCase):
 
     def test_invalid_executed_state_without_link_is_rejected(self):
         choice = self.create_pending_alicia()["receipt_choices"][0]
-        with sqlite3.connect(self.db_path) as connection:
+        with closing(sqlite3.connect(self.db_path)) as connection, connection:
             connection.execute(
                 """
                 UPDATE review_receipts SET status = 'EXECUTED'
@@ -1023,7 +1024,7 @@ class DatabaseSeedTests(unittest.TestCase):
 
     def test_insert_failure_rolls_back_both_balance_updates(self):
         before = self.database.get_state()["accounts"]
-        with sqlite3.connect(self.db_path) as connection:
+        with closing(sqlite3.connect(self.db_path)) as connection, connection:
             connection.executescript(
                 """
                 CREATE TRIGGER force_entry_failure

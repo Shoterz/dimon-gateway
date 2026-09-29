@@ -1,0 +1,53 @@
+param(
+    [switch]$Check
+)
+
+. (Join-Path $PSScriptRoot "..\..\scripts\windows\Import-DimonEnv.ps1")
+
+if (-not $env:DIMON_KOKORO_MODEL_PATH) {
+    Write-Error "DIMON_KOKORO_MODEL_PATH is required"
+    exit 1
+}
+if (-not $env:DIMON_KOKORO_CONFIG_PATH) {
+    Write-Error "DIMON_KOKORO_CONFIG_PATH is required"
+    exit 1
+}
+if (-not $env:DIMON_KOKORO_VOICE_PATH) {
+    Write-Error "DIMON_KOKORO_VOICE_PATH is required"
+    exit 1
+}
+if (-not $env:DIMON_KOKORO_PYTHON) {
+    Write-Error "DIMON_KOKORO_PYTHON is required"
+    exit 1
+}
+if (-not (Test-Path -Path $env:DIMON_KOKORO_MODEL_PATH -PathType Leaf)) {
+    Write-Error "KOKORO_ARTIFACT_NOT_FOUND"
+    exit 1
+}
+if (-not (Test-Path -Path $env:DIMON_KOKORO_CONFIG_PATH -PathType Leaf)) {
+    Write-Error "KOKORO_CONFIG_NOT_FOUND"
+    exit 1
+}
+if (-not (Test-Path -Path $env:DIMON_KOKORO_VOICE_PATH -PathType Leaf)) {
+    Write-Error "KOKORO_VOICE_NOT_FOUND"
+    exit 1
+}
+if (-not (Test-Path -Path $env:DIMON_KOKORO_PYTHON -PathType Leaf)) {
+    Write-Error "KOKORO_RUNTIME_NOT_EXECUTABLE"
+    exit 1
+}
+
+if ($Check) {
+    Write-Output "kokoro: READY"
+    exit 0
+}
+
+$repoRoot = Resolve-Path (Join-Path $PSScriptRoot "..\..")
+& $env:DIMON_KOKORO_PYTHON "$repoRoot\services\kokoro\server.py" `
+    --model $env:DIMON_KOKORO_MODEL_PATH `
+    --config $env:DIMON_KOKORO_CONFIG_PATH `
+    --voice $env:DIMON_KOKORO_VOICE_PATH `
+    --host 127.0.0.1 `
+    --port 3001
+
+exit $LASTEXITCODE

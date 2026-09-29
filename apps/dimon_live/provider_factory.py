@@ -130,9 +130,10 @@ def build_inference_providers(
             connect_timeout = float(env.get("DIMON_NEMOTRON_CONNECT_TIMEOUT", "3"))
             result_timeout = float(env.get("DIMON_NEMOTRON_RESULT_TIMEOUT", "15"))
             start_timeout = float(env.get("DIMON_NEMOTRON_START_TIMEOUT", "120"))
-            runtime_dir = Path(
-                env.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
-            )
+            # os.getuid is POSIX-only; Windows hosts must set
+            # XDG_RUNTIME_DIR or DIMON_NEMOTRON_CONTROL_SOCKET explicitly.
+            uid = os.getuid() if hasattr(os, "getuid") else "unknown"
+            runtime_dir = Path(env.get("XDG_RUNTIME_DIR", f"/run/user/{uid}"))
             lifecycle_path = Path(
                 env.get(
                     "DIMON_NEMOTRON_CONTROL_SOCKET",

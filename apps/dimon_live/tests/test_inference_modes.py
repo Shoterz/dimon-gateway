@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import tempfile
 import unittest
 from dataclasses import FrozenInstanceError
@@ -53,6 +54,7 @@ class InferenceModeTests(unittest.TestCase):
 
         self.assertEqual(raised.exception.reason_code, "INVALID_INFERENCE_MODE")
 
+    @unittest.skipUnless(hasattr(os, "getuid"), "Nemotron default control socket is POSIX-only")
     def test_local_factory_builds_all_current_adapters(self) -> None:
         providers = build_inference_providers("local", {})
 
@@ -117,6 +119,7 @@ class InferenceModeTests(unittest.TestCase):
 
         self.assertEqual(raised.exception.reason_code, "INVALID_LOCAL_INFERENCE_CONFIG")
 
+    @unittest.skipUnless(hasattr(os, "getuid"), "Nemotron default control socket is POSIX-only")
     def test_local_factory_default_backend_is_unchanged(self) -> None:
         providers = build_inference_providers("local", {})
 
