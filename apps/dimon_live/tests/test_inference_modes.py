@@ -87,6 +87,30 @@ class InferenceModeTests(unittest.TestCase):
         self.assertEqual(providers.recognizer.url, "ws://127.0.0.1:8006/v1/stream")
         self.assertIsNone(providers.voice_lifecycle)
 
+    def test_local_factory_whisper_cpp_result_timeout_is_env_configurable(self) -> None:
+        providers = build_inference_providers(
+            "local",
+            {"DIMON_STT_BACKEND": "whisper_cpp", "DIMON_WHISPER_CPP_RESULT_TIMEOUT": "120"},
+        )
+
+        self.assertEqual(providers.recognizer.result_timeout, 120.0)
+
+    def test_local_factory_whisper_cpp_result_timeout_default_is_ninety(self) -> None:
+        providers = build_inference_providers(
+            "local",
+            {"DIMON_STT_BACKEND": "whisper_cpp"},
+        )
+
+        self.assertEqual(providers.recognizer.result_timeout, 90.0)
+
+    def test_local_factory_whisper_intel_result_timeout_default_is_thirty(self) -> None:
+        providers = build_inference_providers(
+            "local",
+            {"DIMON_STT_BACKEND": "whisper_intel"},
+        )
+
+        self.assertEqual(providers.recognizer.result_timeout, 30.0)
+
     def test_local_factory_rejects_an_unknown_stt_backend(self) -> None:
         with self.assertRaises(ProviderConfigurationError) as raised:
             build_inference_providers("local", {"DIMON_STT_BACKEND": "openai"})

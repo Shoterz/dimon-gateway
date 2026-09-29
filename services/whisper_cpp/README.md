@@ -15,7 +15,13 @@ OpenVINO IR files used by `services/whisper_intel`) and
 downloaded whisper.cpp release. Unlike `services/whisper_intel`, no separate
 Python environment is required — this service only needs `fastapi` and
 `uvicorn`, already present in the repo's own `uv`-managed environment, and
-runs via `uv run python`.
+runs via `uv run python`. `apps/dimon_live/provider_factory.py` connects to
+this service via `DIMON_WHISPER_CPP_URL` (default
+`ws://127.0.0.1:8006/v1/stream`); its client-side connect and result timeouts
+are configurable via `DIMON_WHISPER_CPP_CONNECT_TIMEOUT` (default `3`
+seconds) and `DIMON_WHISPER_CPP_RESULT_TIMEOUT` (default `90` seconds, kept
+comfortably above the server's 60-second CLI subprocess timeout so a slow
+CPU-fallback decode isn't mistaken for an unavailable service).
 
 `./run.sh --check` (or `.\run.ps1 -Check` on Windows) validates the model and
 binary paths without transcribing anything. The model and binary remain

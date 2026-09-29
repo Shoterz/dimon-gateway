@@ -41,6 +41,8 @@ _LOCAL_DEFAULTS = {
     "DIMON_WHISPER_CPP_URL": "ws://127.0.0.1:8006/v1/stream",
 }
 
+_STT_BACKENDS = {"nemotron", "whisper_intel", "whisper_cpp"}
+
 
 def _value(env: Mapping[str, str], key: str) -> str:
     value = env.get(key, _LOCAL_DEFAULTS[key]).strip()
@@ -105,7 +107,7 @@ def build_inference_providers(
         )
 
     stt_backend = env.get("DIMON_STT_BACKEND", "nemotron").strip().lower() or "nemotron"
-    if stt_backend not in {"nemotron", "whisper_intel", "whisper_cpp"}:
+    if stt_backend not in _STT_BACKENDS:
         raise ProviderConfigurationError(
             "INVALID_LOCAL_INFERENCE_CONFIG",
             "DIMON_STT_BACKEND must be nemotron, whisper_intel, or whisper_cpp",
@@ -117,8 +119,12 @@ def build_inference_providers(
         kokoro_url = _endpoint(env, "DIMON_KOKORO_URL", {"http", "https"})
         if stt_backend == "whisper_intel":
             whisper_url = _endpoint(env, "DIMON_WHISPER_URL", {"ws", "wss"})
+            whisper_connect_timeout = float(env.get("DIMON_WHISPER_CONNECT_TIMEOUT", "3"))
+            whisper_result_timeout = float(env.get("DIMON_WHISPER_RESULT_TIMEOUT", "30"))
         elif stt_backend == "whisper_cpp":
             whisper_url = _endpoint(env, "DIMON_WHISPER_CPP_URL", {"ws", "wss"})
+            whisper_connect_timeout = float(env.get("DIMON_WHISPER_CPP_CONNECT_TIMEOUT", "3"))
+            whisper_result_timeout = float(env.get("DIMON_WHISPER_CPP_RESULT_TIMEOUT", "90"))
         else:
             nemotron_url = _endpoint(env, "DIMON_NEMOTRON_URL", {"ws", "wss"})
             connect_timeout = float(env.get("DIMON_NEMOTRON_CONNECT_TIMEOUT", "3"))
@@ -144,7 +150,11 @@ def build_inference_providers(
         ) from exc
 
     if stt_backend in {"whisper_intel", "whisper_cpp"}:
-        recognizer = WhisperClient(whisper_url)
+        recognizer = WhisperClient(
+            whisper_url,
+            connect_timeout=whisper_connect_timeout,
+            result_timeout=whisper_result_timeout,
+        )
         voice_lifecycle = None
     else:
         recognizer = NemotronClient(
