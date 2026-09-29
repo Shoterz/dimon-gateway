@@ -107,6 +107,10 @@ def _has_affirmative_target_slot(
     return recipient_first is not None or amount_first is not None
 
 
+def _money_label(minor: int) -> str:
+    return f"S${minor / 100:,.2f}"
+
+
 def _payee_options(matches: Any) -> str:
     """'John Smith ending in 4321 or John Tan ending in 2468' — the account
     ending lets the user tell same-named payees apart without guessing."""
@@ -214,25 +218,64 @@ class ActionService:
 
         choices = response.get("receipt_choices") or []
         batch = response.get("batch_receipt")
-        if batch:
-            amounts = tuple(item["amount_minor"] for item in batch.get("items", ()))
+        if batch and batch.get("receipt_id"):
+            previews = [self.database.policy_for_receipt("batch", batch["receipt_id"])]
+            batch["policy"] = previews[0]
         elif choices:
-            amounts = (choices[0]["amount_minor"],)
+            previews = []
+            for choice in choices:
+                choice["policy"] = self.database.policy_for_receipt("single", choice["receipt_id"])
+                if choice.get("beneficiary_id"):
+                    choice["payee"] = self.database.payee_insight(
+                        choice["beneficiary_id"], choice["amount_minor"]
+                    )
+                previews.append(choice["policy"])
         else:
             return response
-        preview = self.database.policy_preview(amounts)
         trace = [*(response.get("trace") or ())]
-        if not preview["allowed"]:
+        allowed = [preview for preview in previews if preview["allowed"]]
+        if not allowed:
+            reason = previews[0]["reason_code"]
             return {
                 **response,
                 "outcome": "BLOCKED",
-                "reason_code": preview["reason_code"],
-                "trace": trace + [{"stage": preview["reason_code"]}],
+                "reason_code": reason,
+                "trace": trace + [{"stage": reason}],
                 "receipt_choices": [],
                 "batch_receipt": None,
             }
-        stage = "OUT_OF_BAND_REQUIRED" if preview["requires_out_of_band"] else "RISK_POLICY_PASSED"
-        return {**response, "policy": preview, "trace": trace + [{"stage": stage}]}
+        if batch:
+            response = {**response, "policy": previews[0]}
+        elif len(allowed) != len(previews):
+            response = {**response, "receipt_choices": [c for c in choices if c["policy"]["allowed"]]}
+        strongest = max(
+            allowed,
+            key=lambda preview: (preview["requires_out_of_band"], preview["requires_read_back"]),
+        )
+        if strongest["requires_out_of_band"]:
+            stage = "OUT_OF_BAND_REQUIRED"
+        elif strongest["requires_read_back"]:
+            stage = "READ_BACK_REQUIRED"
+        else:
+            stage = "RISK_POLICY_PASSED"
+        trace = trace + [{"stage": stage, "tier": strongest["tier"]}]
+        unusual = [
+            choice for choice in response.get("receipt_choices") or ()
+            if (choice.get("payee") or {}).get("unusual_amount")
+        ]
+        if len(unusual) == 1 and len(response.get("receipt_choices") or ()) == 1:
+            payee = unusual[0]["payee"]
+            trace.append({"stage": "UNUSUAL_AMOUNT_FLAGGED"})
+            response = {
+                **response,
+                "question": (
+                    f"You usually send {unusual[0]['recipient_display_name']} "
+                    f"{_money_label(payee['typical_min_minor'])}–{_money_label(payee['typical_max_minor'])}. "
+                    f"Is {_money_label(unusual[0]['amount_minor'])} right?"
+                ),
+                "unusual_amount": payee["unusual_amount"],
+            }
+        return {**response, "trace": trace}
 
     def _process(self, request_id: str, text: str) -> dict[str, Any]:
         existing = self.database.get_attempt(request_id)
@@ -572,6 +615,7 @@ class ActionService:
             for candidate in self.database.list_saved_beneficiaries()
             if is_grounded(text, candidate["display_name"])
             or is_grounded(text, candidate["normalized_alias"])
+            or any(is_grounded(text, alias) for alias in candidate.get("aliases", ()))
         )
         if resolution.kind == "exact" and (
             len(exact_mentions) != 1
@@ -1112,6 +1156,8 @@ class ActionService:
         assertion: DeviceAssertion | None,
         context: ApprovalContext | None,
         out_of_band_code: str | None = None,
+        read_back_played: bool = False,
+        unusual_amount_confirmed: bool = False,
         user_id: str = DEMO_USER_ID,
     ) -> dict[str, Any]:
         trace = [{"stage": "RECEIPT_APPROVAL_RECEIVED"}]
@@ -1123,6 +1169,8 @@ class ActionService:
                 assertion=assertion,
                 context=context,
                 out_of_band_code=out_of_band_code,
+                read_back_played=read_back_played,
+                unusual_amount_confirmed=unusual_amount_confirmed,
             )
         except ReceiptRejected as exc:
             return {
@@ -1166,6 +1214,8 @@ class ActionService:
         assertion: DeviceAssertion | None,
         context: ApprovalContext | None,
         out_of_band_code: str | None = None,
+        read_back_played: bool = False,
+        unusual_amount_confirmed: bool = False,
         user_id: str = DEMO_USER_ID,
     ) -> dict[str, Any]:
         trace = [{"stage": "BATCH_RECEIPT_APPROVAL_RECEIVED"}]
@@ -1177,6 +1227,8 @@ class ActionService:
                 assertion=assertion,
                 context=context,
                 out_of_band_code=out_of_band_code,
+                read_back_played=read_back_played,
+                unusual_amount_confirmed=unusual_amount_confirmed,
             )
         except ReceiptRejected as exc:
             return {

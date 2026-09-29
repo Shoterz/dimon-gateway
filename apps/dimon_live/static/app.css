@@ -285,6 +285,13 @@ button:focus-visible, textarea:focus-visible, a:focus-visible { outline: 2px sol
 .approval-oob a { color: var(--amber); }
 .approval-confirm:disabled { cursor: not-allowed; opacity: .45; }
 .evidence-link { color: var(--signal); }
+.approval-readback { margin: 0 0 12px; padding: 10px; border: 1px solid var(--line); background: var(--panel); }
+.approval-readback-label { margin: 0 0 4px; color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .06em; }
+.approval-readback-text { margin: 0 0 8px; font-size: 13px; line-height: 1.5; }
+.approval-readback-play { min-height: 36px; padding: 4px 10px; border: 1px solid var(--line); background: transparent; color: var(--signal); }
+.approval-unusual { display: flex; gap: 8px; align-items: flex-start; margin: 0 0 12px; padding: 10px; border: 1px solid rgba(241, 202, 116, .5); font-size: 12px; line-height: 1.5; }
+.approval-unusual input { margin-top: 2px; min-width: 18px; min-height: 18px; }
+.payee-flag { display: inline-block; margin-top: 3px; padding: 1px 6px; border: 1px solid var(--amber); color: var(--amber); font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; }
 .approval-actions { display: flex; gap: 10px; justify-content: flex-end; }
 .approval-cancel, .approval-confirm { min-height: 44px; padding: 8px 16px; border: 1px solid var(--line); background: transparent; color: var(--paper); font-weight: 700; }
 .approval-confirm {

@@ -120,14 +120,22 @@ class ActionServiceTests(unittest.TestCase):
         )
         return self.device.sign(challenge)
 
-    def signed_approve(self, service, choice, *, assertion=None, user_id="demo_user_01"):
+    def signed_approve(self, service, choice, *, assertion=None, user_id="demo_user_01", code=None):
         return service.approve(
             choice["receipt_id"],
             choice["receipt_digest"],
             assertion=assertion or self.sign(choice),
             context=self.device.context,
+            out_of_band_code=code,
             user_id=user_id,
         )
+
+    def code_for(self, choice):
+        from apps.dimon_live.risk_policy import token_code
+
+        with closing(sqlite3.connect(self.database.path)) as connection:
+            secret = connection.execute("SELECT token_secret FROM customer_profiles").fetchone()[0]
+        return token_code(secret, choice["receipt_id"], choice["receipt_digest"])
 
     def service_for(self, intent):
         from apps.dimon_live.service import ActionService
@@ -644,10 +652,16 @@ class ActionServiceTests(unittest.TestCase):
         self.assertEqual(receipt["destination_reference"], "86952933")
         self.assertTrue(receipt["lookup_reference"].startswith("lookup_"))
         self.assertEqual(self.balances(), before)
+        # A PayNow number never paid before is a new payee: token required.
+        self.assertTrue(choice["policy"]["requires_out_of_band"])
+        self.assertTrue(choice["payee"]["new_payee"])
 
         assertion = self.sign(choice)
-        executed = self.signed_approve(service, choice, assertion=assertion)
-        replay = self.signed_approve(service, choice, assertion=assertion)
+        without_token = self.signed_approve(service, choice, assertion=assertion)
+        self.assertEqual(without_token["reason_code"], "OUT_OF_BAND_REQUIRED")
+        assertion = self.sign(choice)
+        executed = self.signed_approve(service, choice, assertion=assertion, code=self.code_for(choice))
+        replay = self.signed_approve(service, choice, assertion=assertion, code=self.code_for(choice))
 
         self.assertEqual(executed["outcome"], "EXECUTED_SYNTHETIC_TRANSFER")
         self.assertEqual(executed["transaction_id"], replay["transaction_id"])

@@ -180,7 +180,9 @@ class SpeechService:
         synthesizer: Callable[[str], Awaitable[bytes]] | None = None,
         max_wav_bytes: int = 8 * 1_048_576,
         ttl_seconds: int = 3600,
+        read_back_synthesizer: Callable[[str], Awaitable[bytes]] | None = None,
     ):
+        self.read_back_synthesizer = read_back_synthesizer
         self.base_url = base_url
         self.audio_dir = Path(audio_dir)
         self.synthesizer = synthesizer or KokoroSynthesizer(base_url)
@@ -223,6 +225,33 @@ class SpeechService:
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
         return artifact_id
+
+    def queue_text(self, text: str, context) -> str | None:
+        """Synthesize arbitrary server-built text (e.g. a draft read-back)."""
+        if not text:
+            return None
+        artifact_id = secrets.token_urlsafe(18)
+        path = self.audio_dir / context.session_id / f"{artifact_id}.wav"
+        self._artifacts[artifact_id] = (context.session_id, path, time.time() + self.ttl_seconds)
+        self._pending.add(artifact_id)
+        task = asyncio.create_task(self._synthesize_text(text, artifact_id, path))
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+        return artifact_id
+
+    async def _synthesize_text(self, text: str, artifact_id: str, path: Path) -> None:
+        try:
+            synthesizer = self.read_back_synthesizer or self.synthesizer
+            data = await synthesizer(text)
+            if isinstance(data, bytes) and len(data) <= self.max_wav_bytes and data[:4] == b"RIFF" and data[8:12] == b"WAVE":
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(data)
+            else:
+                self._artifacts.pop(artifact_id, None)
+        except Exception:
+            self._artifacts.pop(artifact_id, None)
+        finally:
+            self._pending.discard(artifact_id)
 
     async def _synthesize_queued(
         self,

@@ -21,6 +21,8 @@ from .approval_gateway import (
     b64url_decode,
 )
 from .database import Database, ReceiptRejected
+from .read_back import build_read_back
+from .tencent_tts import read_back_synthesizer_from_env
 from .inference import InferenceProviders
 from .model_adapter import Extractor
 from .provider_factory import build_inference_providers
@@ -75,6 +77,8 @@ class ReceiptApprovalRequest(BaseModel):
     receipt_digest: ReceiptDigest
     assertion: DeviceAssertionPayload
     out_of_band_code: Annotated[str, Field(pattern=r"^\d{6}$")] | None = None
+    read_back_played: bool = False
+    unusual_amount_confirmed: bool = False
 
 
 class ReceiptChallengeRequest(BaseModel):
@@ -184,6 +188,9 @@ def create_app(
         synthesizer=selected_providers.synthesizer,
         max_wav_bytes=int(os.environ.get("DIMON_MAX_WAV_BYTES", str(8 * 1_048_576)),),
         ttl_seconds=int(os.environ.get("DIMON_VISITOR_TTL_SECONDS", "3600")),
+        read_back_synthesizer=read_back_synthesizer_from_env(
+            os.environ, selected_providers.synthesizer
+        ),
     )
 
     def resolve(request: Request, response: Response) -> SessionContext:
@@ -362,7 +369,7 @@ def create_app(
     ) -> dict:
         context = resolve(request, response)
         try:
-            return context.database.issue_approval_challenge(
+            challenge = context.database.issue_approval_challenge(
                 kind,
                 receipt_id,
                 digest,
@@ -370,6 +377,15 @@ def create_app(
             )
         except ReceiptRejected as exc:
             return blocked(exc.reason_code, context)
+        # Voice out: the read-back is built from the same stored review data
+        # the confirmation window shows.
+        text = build_read_back(challenge["review"])
+        queue_text = getattr(application.state.speech_service, "queue_text", None)
+        challenge["review"]["read_back"] = {
+            "text": text,
+            "audio_artifact_id": queue_text(text, context) if callable(queue_text) else None,
+        }
+        return challenge
 
     @application.post("/api/receipts/{receipt_id}/challenge")
     async def single_receipt_challenge(
@@ -410,6 +426,8 @@ def create_app(
             assertion=assertion,
             context=approval_context(request),
             out_of_band_code=approval.out_of_band_code,
+            read_back_played=approval.read_back_played,
+            unusual_amount_confirmed=approval.unusual_amount_confirmed,
         )
         return await attach_speech(result, context)
 
@@ -431,6 +449,8 @@ def create_app(
             assertion=assertion,
             context=approval_context(request),
             out_of_band_code=approval.out_of_band_code,
+            read_back_played=approval.read_back_played,
+            unusual_amount_confirmed=approval.unusual_amount_confirmed,
         )
         return await attach_speech(result, context)
 

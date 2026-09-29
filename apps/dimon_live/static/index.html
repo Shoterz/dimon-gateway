@@ -185,6 +185,15 @@
         <div><dt>Signer</dt><dd id="approval-method">—</dd></div>
       </dl>
       <div id="approval-validation" class="approval-validation" role="status"></div>
+      <div id="approval-readback" class="approval-readback" hidden>
+        <p class="approval-readback-label">Read back to you</p>
+        <p id="approval-readback-text" class="approval-readback-text"></p>
+        <button id="approval-readback-play" type="button" class="approval-readback-play">▶ Play again</button>
+      </div>
+      <label id="approval-unusual" class="approval-unusual" hidden>
+        <input id="approval-unusual-check" type="checkbox">
+        <span id="approval-unusual-text"></span>
+      </label>
       <div id="approval-oob" class="approval-oob" hidden>
         <label for="approval-oob-code">High-value transfer · enter the 6-digit code from your hardware token</label>
         <input id="approval-oob-code" inputmode="numeric" autocomplete="one-time-code" pattern="\d{6}" maxlength="6" placeholder="000000">

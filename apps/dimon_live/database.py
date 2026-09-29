@@ -34,6 +34,17 @@ from .risk_policy import (
     mock_token_code,
     seed_profile,
     verify_out_of_band,
+    verify_requirements,
+)
+from .payees import (
+    PAYEE_SCHEMA,
+    aliases_for,
+    describe_last_payment,
+    describe_typical,
+    history as payee_history,
+    is_new_payee,
+    seed_payees,
+    unusual_amount,
 )
 from .validation_store import VALIDATION_SCHEMA, record_validation
 from .signing_store import (
@@ -392,6 +403,7 @@ class Database:
             connection.executescript(VALIDATION_SCHEMA)
             connection.executescript(POLICY_SCHEMA)
             connection.executescript(AUDIT_SCHEMA)
+            connection.executescript(PAYEE_SCHEMA)
             seed_profile(connection, DEMO_USER_ID, self._clock())
             self._apply_v2_migrations(connection)
             count = connection.execute("SELECT COUNT(*) FROM accounts").fetchone()[0]
@@ -399,6 +411,7 @@ class Database:
                 self._insert_seed(connection)
             else:
                 self._insert_paynow_seed(connection)
+                seed_payees(connection, self._clock())
 
     @staticmethod
     def _apply_v2_migrations(connection: sqlite3.Connection) -> None:
@@ -488,6 +501,10 @@ class Database:
         }
         if "directory_kind" in columns:
             self._insert_paynow_seed(connection)
+        if connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'prior_payments'"
+        ).fetchone():
+            seed_payees(connection, self._clock())
 
     @staticmethod
     def _insert_paynow_seed(connection: sqlite3.Connection) -> None:
@@ -541,6 +558,9 @@ class Database:
                 connection.execute("DELETE FROM paynow_proxies")
                 connection.execute("DELETE FROM review_receipts")
                 connection.execute("DELETE FROM action_attempts")
+                connection.execute("DELETE FROM beneficiary_aliases")
+                connection.execute("DELETE FROM prior_payments")
+                connection.execute("DELETE FROM payee_registrations")
                 connection.execute("DELETE FROM beneficiaries")
                 connection.execute("DELETE FROM accounts")
                 self._insert_seed(connection)
@@ -669,10 +689,15 @@ class Database:
                        masked_destination
                 FROM beneficiaries
                 WHERE directory_kind = 'SAVED'
-                  AND (normalized_alias = ? OR lower(display_name) = ?)
+                  AND (
+                    normalized_alias = :label OR lower(display_name) = :label
+                    OR beneficiary_id IN (
+                      SELECT beneficiary_id FROM beneficiary_aliases WHERE alias = :label
+                    )
+                  )
                 ORDER BY display_name COLLATE NOCASE
                 """,
-                (normalized, normalized),
+                {"label": " ".join(normalized.split())},
             ).fetchall()
             if exact:
                 return Resolution("exact", tuple(dict(row) for row in exact))
@@ -735,7 +760,27 @@ class Database:
                 ORDER BY display_name COLLATE NOCASE
                 """
             ).fetchall()
-        return tuple(dict(row) for row in rows)
+            return tuple(
+                {**dict(row), "aliases": aliases_for(connection, row["beneficiary_id"])}
+                for row in rows
+            )
+
+    def payee_insight(self, beneficiary_id: str, amount_minor: int | None = None) -> dict[str, Any]:
+        """History-based context shown with a draft: last payment, the usual
+        range, whether the payee is new, and whether this amount is unusual."""
+
+        now = self._clock()
+        with self._connect() as connection:
+            record = payee_history(connection, beneficiary_id)
+        return {
+            **record.to_dict(),
+            "last_payment": describe_last_payment(record, now),
+            "typical": describe_typical(record),
+            "new_payee": is_new_payee(record, now),
+            "unusual_amount": (
+                unusual_amount(record, amount_minor) if amount_minor is not None else None
+            ),
+        }
 
     def get_attempt(self, request_id: str) -> dict[str, Any] | None:
         with self._connect() as connection:
@@ -947,6 +992,8 @@ class Database:
         assertion: DeviceAssertion | None,
         context: ApprovalContext | None,
         out_of_band_code: str | None = None,
+        read_back_played: bool = False,
+        unusual_amount_confirmed: bool = False,
         now: datetime | None = None,
     ) -> dict[str, Any]:
         with self._connect() as connection:
@@ -1060,8 +1107,12 @@ class Database:
                     user_id=user_id,
                     receipt_id=receipt_id,
                     receipt_digest=row["receipt_digest"],
-                    item_amounts=tuple(item["amount_minor"] for item in item_dicts),
+                    items=tuple(
+                        (item["beneficiary_id"], item["amount_minor"]) for item in item_dicts
+                    ),
                     out_of_band_code=out_of_band_code,
+                    read_back_played=read_back_played,
+                    unusual_amount_confirmed=unusual_amount_confirmed,
                     now=approved_at,
                 )
                 source = connection.execute(
@@ -1356,6 +1407,7 @@ class Database:
                     {
                         "receipt_id": record["receipt_id"],
                         "receipt_digest": record["receipt_digest"],
+                        "beneficiary_id": record["beneficiary_id"],
                         "source_label": source["label"],
                         "recipient_display_name": record[
                             "recipient_display_name"
@@ -1722,6 +1774,7 @@ class Database:
                     {
                         "receipt_id": record["receipt_id"],
                         "receipt_digest": record["receipt_digest"],
+                        "beneficiary_id": record["beneficiary_id"],
                         "source_label": source["label"],
                         "recipient_display_name": record["recipient_display_name"],
                         "amount_minor": record["amount_minor"],
@@ -1998,15 +2051,20 @@ class Database:
         user_id: str,
         receipt_id: str,
         receipt_digest: str,
-        item_amounts: tuple[int, ...],
+        items: tuple[tuple[str, int], ...],
         out_of_band_code: str | None,
+        read_back_played: bool,
+        unusual_amount_confirmed: bool,
         now: datetime,
     ) -> None:
-        """Authoritative KYC, limit, velocity, and out-of-band check."""
+        """Authoritative KYC, limit, velocity, and friction-tier check."""
 
         try:
-            decision = evaluate_policy(
-                connection, user_id=user_id, item_amounts=item_amounts, now=now
+            decision = evaluate_policy(connection, user_id=user_id, items=items, now=now)
+            verify_requirements(
+                decision,
+                read_back_played=read_back_played,
+                unusual_amount_confirmed=unusual_amount_confirmed,
             )
             if decision.requires_out_of_band:
                 verify_out_of_band(
@@ -2019,15 +2077,33 @@ class Database:
         except PolicyRejected as exc:
             raise ReceiptRejected(exc.reason_code, persist_status=exc.persist) from None
 
-    def policy_preview(
-        self, item_amounts: tuple[int, ...], *, user_id: str = DEMO_USER_ID
+    @staticmethod
+    def _receipt_items(connection: sqlite3.Connection, kind: str, receipt_id: str) -> tuple[tuple[str, int], ...]:
+        if kind == "single":
+            row = connection.execute(
+                "SELECT beneficiary_id, amount_minor FROM review_receipts WHERE receipt_id = ?",
+                (receipt_id,),
+            ).fetchone()
+            return ((row["beneficiary_id"], row["amount_minor"]),) if row else ()
+        return tuple(
+            (row["beneficiary_id"], row["amount_minor"])
+            for row in connection.execute(
+                "SELECT beneficiary_id, amount_minor FROM batch_receipt_items WHERE receipt_id = ? ORDER BY position",
+                (receipt_id,),
+            )
+        )
+
+    def policy_for_receipt(
+        self, kind: str, receipt_id: str, *, user_id: str = DEMO_USER_ID
     ) -> dict[str, Any]:
-        """Early, non-authoritative check shown with a draft."""
+        """Early, non-authoritative check shown with a draft. KYC is checked at
+        signing time, so a user can explore drafts before onboarding."""
 
         with self._connect() as connection:
+            items = self._receipt_items(connection, kind, receipt_id)
             try:
                 decision = evaluate_policy(
-                    connection, user_id=user_id, item_amounts=item_amounts, now=self._clock()
+                    connection, user_id=user_id, items=items, now=self._clock(), require_kyc=False
                 )
             except PolicyRejected as exc:
                 return {"allowed": False, "reason_code": exc.reason_code}
@@ -2050,49 +2126,60 @@ class Database:
     def mock_token_display(
         self, *, user_id: str = DEMO_USER_ID, now: datetime | None = None
     ) -> list[dict[str, Any]]:
-        """What the simulated hardware token shows: one code per high-value
-        receipt awaiting approval, alongside the amount and payee it covers."""
+        """What the hardware token shows: one code per awaiting receipt whose
+        tier needs it (new payee or high value), with the amount and payee."""
 
         current = (now or self._clock()).astimezone(timezone.utc)
         with self._connect() as connection:
-            threshold = connection.execute(
-                "SELECT out_of_band_threshold_minor FROM customer_profiles WHERE user_id = ?",
-                (user_id,),
-            ).fetchone()
-            if threshold is None:
-                return []
             rows = [
-                *connection.execute(
+                ("single", row)
+                for row in connection.execute(
                     """
                     SELECT receipt_id, receipt_digest, amount_minor AS total_minor,
                            recipient_display_name AS payee, expires_at
                     FROM review_receipts
-                    WHERE user_id = ? AND status = 'AWAITING_CONFIRMATION' AND amount_minor >= ?
+                    WHERE user_id = ? AND status = 'AWAITING_CONFIRMATION'
                     """,
-                    (user_id, threshold[0]),
-                ),
-                *connection.execute(
+                    (user_id,),
+                )
+            ] + [
+                ("batch", row)
+                for row in connection.execute(
                     """
                     SELECT receipt_id, receipt_digest, total_minor,
                            'batch of payees' AS payee, expires_at
                     FROM batch_review_receipts
-                    WHERE user_id = ? AND status = 'AWAITING_CONFIRMATION' AND total_minor >= ?
+                    WHERE user_id = ? AND status = 'AWAITING_CONFIRMATION'
                     """,
-                    (user_id, threshold[0]),
-                ),
+                    (user_id,),
+                )
             ]
-            return [
-                {
-                    "receipt_id": row["receipt_id"],
-                    "payee": row["payee"],
-                    "total_minor": row["total_minor"],
-                    "code": mock_token_code(
-                        connection, user_id, row["receipt_id"], row["receipt_digest"]
-                    ),
-                }
-                for row in rows
-                if datetime.fromisoformat(row["expires_at"]) > current
-            ]
+            shown = []
+            for kind, row in rows:
+                if datetime.fromisoformat(row["expires_at"]) <= current:
+                    continue
+                try:
+                    decision = evaluate_policy(
+                        connection,
+                        user_id=user_id,
+                        items=self._receipt_items(connection, kind, row["receipt_id"]),
+                        now=current,
+                        require_kyc=False,
+                    )
+                except PolicyRejected:
+                    continue
+                if decision.requires_out_of_band:
+                    shown.append(
+                        {
+                            "receipt_id": row["receipt_id"],
+                            "payee": row["payee"],
+                            "total_minor": row["total_minor"],
+                            "code": mock_token_code(
+                                connection, user_id, row["receipt_id"], row["receipt_digest"]
+                            ),
+                        }
+                    )
+            return shown
 
     def audit_event(
         self,
@@ -2344,6 +2431,7 @@ class Database:
                     ).fetchone()
                     items = [
                         {
+                            "beneficiary_id": row["beneficiary_id"],
                             "recipient_display_name": row["recipient_display_name"],
                             "masked_destination": masked["masked_destination"] if masked else None,
                             "amount_minor": row["amount_minor"],
@@ -2355,8 +2443,8 @@ class Database:
                         dict(item)
                         for item in connection.execute(
                             """
-                            SELECT i.recipient_display_name, b.masked_destination,
-                                   i.amount_minor
+                            SELECT i.beneficiary_id, i.recipient_display_name,
+                                   b.masked_destination, i.amount_minor
                             FROM batch_receipt_items i
                             JOIN beneficiaries b ON b.beneficiary_id = i.beneficiary_id
                             WHERE i.receipt_id = ? ORDER BY i.position
@@ -2369,11 +2457,20 @@ class Database:
                     decision = evaluate_policy(
                         connection,
                         user_id=user_id,
-                        item_amounts=tuple(item["amount_minor"] for item in items),
+                        items=tuple((item["beneficiary_id"], item["amount_minor"]) for item in items),
                         now=issued_at,
                     )
                 except PolicyRejected as exc:
                     raise ReceiptRejected(exc.reason_code) from None
+                for item in items:
+                    item["new_payee"] = item["beneficiary_id"] in decision.new_payees
+                    item["unusual_amount"] = next(
+                        (
+                            flag for flag in decision.unusual_amounts
+                            if flag["beneficiary_id"] == item["beneficiary_id"]
+                        ),
+                        None,
+                    )
                 challenge = issue_challenge(
                     connection,
                     purpose=purpose,
@@ -2399,6 +2496,9 @@ class Database:
                 "receipt_expires_at": row["expires_at"],
                 "validation": validation.to_dict(),
                 "requires_out_of_band": decision.requires_out_of_band,
+                "requires_read_back": decision.requires_read_back,
+                "requires_unusual_confirmation": decision.requires_unusual_confirmation,
+                "policy": decision.to_dict(),
             },
         }
 
@@ -2411,6 +2511,8 @@ class Database:
         assertion: DeviceAssertion | None,
         context: ApprovalContext | None,
         out_of_band_code: str | None = None,
+        read_back_played: bool = False,
+        unusual_amount_confirmed: bool = False,
         now: datetime | None = None,
     ) -> dict[str, Any]:
         with self._connect() as connection:
@@ -2447,6 +2549,8 @@ class Database:
                     now=approved_at,
                     approval=approval,
                     out_of_band_code=out_of_band_code,
+                    read_back_played=read_back_played,
+                    unusual_amount_confirmed=unusual_amount_confirmed,
                 )
                 connection.commit()
                 return response
@@ -2471,6 +2575,8 @@ class Database:
         now: datetime,
         approval: Mapping[str, Any] | None = None,
         out_of_band_code: str | None = None,
+        read_back_played: bool = False,
+        unusual_amount_confirmed: bool = False,
     ) -> dict[str, Any]:
         row = dict(receipt)
         if row["user_id"] != user_id:
@@ -2568,8 +2674,10 @@ class Database:
             user_id=user_id,
             receipt_id=row["receipt_id"],
             receipt_digest=row["receipt_digest"],
-            item_amounts=(row["amount_minor"],),
+            items=((row["beneficiary_id"], row["amount_minor"]),),
             out_of_band_code=out_of_band_code,
+            read_back_played=read_back_played,
+            unusual_amount_confirmed=unusual_amount_confirmed,
             now=now,
         )
 

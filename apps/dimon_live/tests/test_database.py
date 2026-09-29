@@ -1033,6 +1033,7 @@ class DatabaseSeedTests(unittest.TestCase):
                 ("John Smith", 10000),
                 ("John Tan", 7500),
                 ("JXXX SXXXX", 0),
+                ("Lim Siew Hua", 20000),
             ],
         )
         self.approve(self.create_pending_alicia()["receipt_choices"][0])
@@ -1050,6 +1051,7 @@ class DatabaseSeedTests(unittest.TestCase):
                 ("John Smith", 10000),
                 ("John Tan", 7500),
                 ("JXXX SXXXX", 0),
+                ("Lim Siew Hua", 20000),
             ],
         )
         self.assertEqual(reset_state["transactions"], [])

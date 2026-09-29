@@ -50,6 +50,12 @@ const ui = {
   approvalValidation: document.querySelector("#approval-validation"),
   approvalOob: document.querySelector("#approval-oob"),
   approvalOobCode: document.querySelector("#approval-oob-code"),
+  approvalReadBack: document.querySelector("#approval-readback"),
+  approvalReadBackText: document.querySelector("#approval-readback-text"),
+  approvalReadBackPlay: document.querySelector("#approval-readback-play"),
+  approvalUnusual: document.querySelector("#approval-unusual"),
+  approvalUnusualCheck: document.querySelector("#approval-unusual-check"),
+  approvalUnusualText: document.querySelector("#approval-unusual-text"),
 };
 
 let previousBalances = new Map();
@@ -69,6 +75,7 @@ let voiceTerminal = false;
 let voicePhase = "idle";
 let voiceFinishing = false;
 let voiceStage = "audio_context";
+let lastRequestWasSpoken = false;
 const voiceDeadline = new VoiceDeadline();
 let audioPollGeneration = 0;
 const escapeHtml = value => String(value)
@@ -132,7 +139,11 @@ const stageCopy = {
   VALIDATION_ATTENTION: ["Validator flagged", "Some fields need your check"],
   VALIDATION_FROZEN: ["Validator froze draft", "Contradicts your words"],
   RISK_POLICY_PASSED: ["Risk policy passed", "KYC, limits and velocity"],
-  OUT_OF_BAND_REQUIRED: ["High-value transfer", "Hardware token code required"],
+  OUT_OF_BAND_REQUIRED: ["Token code required", "New payee or over S$2,000"],
+  READ_BACK_REQUIRED: ["Read-back required", "S$200 and above is read aloud"],
+  UNUSUAL_AMOUNT_FLAGGED: ["Unusual amount", "Not what you usually send"],
+  NEW_PAYEE_LIMIT_EXCEEDED: ["New payee limit", "S$100 for the first 24 hours"],
+  UNUSUAL_AMOUNT_UNCONFIRMED: ["Amount not confirmed", "Nothing moved"],
   KYC_PENDING: ["KYC incomplete", "No ledger mutation"],
   KYC_EXPIRED: ["KYC expired", "No ledger mutation"],
   KYC_REJECTED: ["KYC rejected", "No ledger mutation"],
@@ -361,12 +372,56 @@ function describeSigner(kind) {
 
 // The deterministic confirmation overlay. Every fact shown comes from the
 // server-stored receipt returned with the challenge, never from model text.
+// Plays the server-generated read-back (Kokoro or Tencent Cloud voice). If
+// that audio is unavailable, the browser's own voice reads the same text; if
+// there is no voice at all, showing the text counts as presented. Returns a
+// function that stops playback.
+function speakReadBack(readBack, onDone) {
+  let stopped = false;
+  let audio = null;
+  const finish = () => { if (!stopped) onDone(); };
+  const browserVoice = () => {
+    if (stopped) return;
+    if (!("speechSynthesis" in window)) { finish(); return; }
+    const utterance = new SpeechSynthesisUtterance(readBack.text);
+    utterance.onend = finish;
+    // A blocked or failed utterance was not heard: leave "Play again" to the user.
+    utterance.onerror = () => {};
+    window.speechSynthesis.cancel();
+    window.speechSynthesis.speak(utterance);
+  };
+  (async () => {
+    if (!readBack?.audio_artifact_id) { browserVoice(); return; }
+    const url = `/api/audio/${encodeURIComponent(readBack.audio_artifact_id)}`;
+    for (let attempt = 0; attempt < 60 && !stopped; attempt += 1) {
+      try {
+        const response = await fetch(url, {cache: "no-store"});
+        if (response.status === 202) { await new Promise(r => setTimeout(r, 250)); continue; }
+        if (!response.ok) break;
+        audio = new Audio(URL.createObjectURL(await response.blob()));
+        audio.onended = finish;
+        audio.onerror = browserVoice;
+        await audio.play();
+        return;
+      } catch (_error) {
+        break;
+      }
+    }
+    browserVoice();
+  })();
+  return () => {
+    stopped = true;
+    if (audio) audio.pause();
+    if ("speechSynthesis" in window) window.speechSynthesis.cancel();
+  };
+}
+
 function confirmOnDevice(challenge, signerKind) {
   const review = challenge.review;
   const signer = describeSigner(signerKind);
   ui.approvalItems.innerHTML = review.items.map(item => `<div class="approval-item">
-      <span><small>To</small><strong>${escapeHtml(item.recipient_display_name)}</strong>${item.masked_destination ? `<em>${escapeHtml(item.masked_destination)}</em>` : ""}</span>
-      <span><small>Amount</small><strong>${escapeHtml(formatSgd(item.amount_minor))}</strong></span>
+      <span><small>To</small><strong>${escapeHtml(item.recipient_display_name)}</strong>${item.masked_destination ? `<em>${escapeHtml(item.masked_destination)}</em>` : ""}${item.new_payee ? '<b class="payee-flag">New payee</b>' : ""}</span>
+      <span><small>Amount</small><strong>${escapeHtml(formatSgd(item.amount_minor))}</strong>${item.unusual_amount ? '<b class="payee-flag">Unusual amount</b>' : ""}</span>
     </div>`).join("");
   ui.approvalSource.textContent = review.source_label || "—";
   ui.approvalTotal.textContent = formatSgd(review.total_minor);
@@ -383,18 +438,55 @@ function confirmOnDevice(challenge, signerKind) {
   const needsCode = Boolean(review.requires_out_of_band);
   ui.approvalOob.hidden = !needsCode;
   ui.approvalOobCode.value = "";
+  // Read-back: required for the S$200+ tier and unusual amounts; also played
+  // whenever the request was spoken, so voice in means voice out.
+  const readBack = review.read_back;
+  const needsReadBack = Boolean(review.requires_read_back);
+  let readBackPlayed = false;
+  let stopReadBack = () => {};
+  ui.approvalReadBack.hidden = !readBack;
+  ui.approvalReadBackText.textContent = readBack?.text || "";
+  // Unusual amount: an explicit "yes, that amount" before signing.
+  const needsUnusual = Boolean(review.requires_unusual_confirmation);
+  const unusualItem = review.items.find(item => item.unusual_amount);
+  ui.approvalUnusual.hidden = !needsUnusual;
+  ui.approvalUnusualCheck.checked = false;
+  ui.approvalUnusualText.textContent = unusualItem
+    ? `Yes, ${formatSgd(unusualItem.amount_minor)} to ${unusualItem.recipient_display_name} is correct. You usually send ${formatSgd(unusualItem.unusual_amount.typical_min_minor)}–${formatSgd(unusualItem.unusual_amount.typical_max_minor)}.`
+    : "";
   const codeReady = () => !needsCode || /^\d{6}$/.test(ui.approvalOobCode.value);
-  const syncConfirm = () => { ui.approvalConfirm.disabled = !codeReady(); };
+  const allReady = () => codeReady()
+    && (!needsReadBack || readBackPlayed)
+    && (!needsUnusual || ui.approvalUnusualCheck.checked);
+  const syncConfirm = () => {
+    ui.approvalConfirm.disabled = !allReady();
+    ui.approvalConfirm.title = needsReadBack && !readBackPlayed ? "Listen to the read-back first" : "";
+  };
+  const playReadBack = () => {
+    stopReadBack();
+    stopReadBack = speakReadBack(readBack, () => { readBackPlayed = true; syncConfirm(); });
+  };
+  ui.approvalReadBackPlay.onclick = playReadBack;
   ui.approvalOobCode.oninput = syncConfirm;
+  ui.approvalUnusualCheck.onchange = syncConfirm;
   syncConfirm();
+  if (readBack && (needsReadBack || lastRequestWasSpoken)) playReadBack();
   return new Promise(resolve => {
     let holdTimer = null;
     let holdStarted = 0;
     let frame = null;
     const cleanup = confirmed => {
       const result = confirmed
-        ? {confirmed: true, outOfBandCode: needsCode ? ui.approvalOobCode.value : undefined}
+        ? {
+            confirmed: true,
+            outOfBandCode: needsCode ? ui.approvalOobCode.value : undefined,
+            readBackPlayed,
+            unusualConfirmed: needsUnusual && ui.approvalUnusualCheck.checked,
+          }
         : {confirmed: false};
+      stopReadBack();
+      ui.approvalReadBackPlay.onclick = null;
+      ui.approvalUnusualCheck.onchange = null;
       ui.approvalOobCode.oninput = null;
       ui.approvalConfirm.disabled = false;
       clearTimeout(holdTimer);
@@ -411,7 +503,7 @@ function confirmOnDevice(challenge, signerKind) {
       resolve(result);
     };
     const startHold = () => {
-      if (holdTimer || !codeReady()) return;
+      if (holdTimer || !allReady()) return;
       holdStarted = performance.now();
       const paint = () => {
         const progress = Math.min(1, (performance.now() - holdStarted) / 1200);
@@ -439,7 +531,7 @@ function confirmOnDevice(challenge, signerKind) {
       };
       ui.approvalConfirm.onkeyup = stopHold;
     } else {
-      ui.approvalConfirm.onclick = () => { if (codeReady()) cleanup(true); };
+      ui.approvalConfirm.onclick = () => { if (allReady()) cleanup(true); };
     }
     ui.approvalCancel.onclick = () => cleanup(false);
     ui.approvalDialog.oncancel = event => {
@@ -493,6 +585,8 @@ async function signedApproval(collection, receipt, submit, interruptedDetail) {
       signed = {
         assertion: wireAssertion(await deviceApprover.signChallenge(issued.challenge)),
         out_of_band_code: decision.outOfBandCode,
+        read_back_played: Boolean(decision.readBackPlayed),
+        unusual_amount_confirmed: Boolean(decision.unusualConfirmed),
       };
       signedAssertions.set(receipt.receipt_id, signed);
     }
@@ -628,6 +722,7 @@ function renderResult(result, elapsedMs) {
           <span><small>Amount</small><strong>${escapeHtml(formatSgd(choice.amount_minor))}</strong></span>
           ${payNow ? `<span><small>Proxy</small><strong>${escapeHtml(choice.destination_reference)}</strong></span>` : ""}
           ${choice.payment_reference ? `<span><small>Reference</small><strong>${escapeHtml(choice.payment_reference)}</strong></span>` : ""}
+          ${choice.payee ? `<span><small>History</small><strong>${escapeHtml(choice.payee.new_payee ? "New payee" : [choice.payee.last_payment, choice.payee.typical].filter(Boolean).join(" · ") || "—")}</strong></span>` : ""}
           <span><small>Expires</small><strong>${escapeHtml(expiryLabel)}</strong></span>
         </div>
         <button type="button" class="candidate-choice" data-index="${index}">Review &amp; sign</button>
@@ -826,6 +921,7 @@ async function startVoice() {
         ui.input.value = message.text;
         ui.voiceStatus.textContent = `Heard: ${message.text}`;
       } else if (message.type === "action_result") {
+        lastRequestWasSpoken = true;
         voiceDeadline.clear();
         voiceTerminal = true;
         voicePhase = "complete";
@@ -883,6 +979,7 @@ ui.form.addEventListener("submit", async event => {
   event.preventDefault();
   const text = ui.input.value.trim();
   if (!text) return;
+  lastRequestWasSpoken = false;
   const started = performance.now();
   setBusy(true);
   setOutcome(
