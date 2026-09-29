@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -33,6 +34,7 @@ class CleanCloneTests(unittest.TestCase):
             )
             completed = subprocess.run(
                 [
+                    sys.executable,
                     str(ROOT / "scripts/check-repository-boundary"),
                     "--root",
                     str(clone),
