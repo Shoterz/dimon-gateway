@@ -9,6 +9,7 @@ payees apart, flags amounts that do not fit the history ("fifteen" heard as
 
 from __future__ import annotations
 
+import re
 import secrets
 import sqlite3
 from dataclasses import dataclass
@@ -219,3 +220,73 @@ def describe_typical(record: PayeeHistory) -> str | None:
         return None
     low, high = record.min_amount_minor, record.max_amount_minor
     return f"usually {_money(low)}" if low == high else f"usually {_money(low)}–{_money(high)}"
+
+
+class PayeeSaveRejected(ValueError):
+    def __init__(self, reason_code: str):
+        super().__init__(reason_code)
+        self.reason_code = reason_code
+
+
+_NICKNAME = re.compile(r"[A-Za-z][A-Za-z '\-]{1,38}[A-Za-z]")
+
+
+def save_paynow_payee(
+    connection: sqlite3.Connection, *, receipt_id: str, nickname: str, now: datetime
+) -> dict[str, Any]:
+    """Save the recipient of a settled PayNow transfer as a named payee.
+
+    The payee points at the destination PayNow already confirmed and is
+    registered as new, so for its first 24 hours every payment to it needs
+    the one-time code and stays under the new-payee cap.
+    """
+
+    nickname = " ".join(nickname.split())
+    if not _NICKNAME.fullmatch(nickname):
+        raise PayeeSaveRejected("INVALID_NICKNAME")
+    receipt = connection.execute(
+        """
+        SELECT r.receipt_id, r.destination_account_id, r.destination_reference
+        FROM review_receipts r JOIN receipt_executions e ON e.receipt_id = r.receipt_id
+        WHERE r.receipt_id = ? AND r.destination_kind = 'PAYNOW_MOBILE'
+        """,
+        (receipt_id,),
+    ).fetchone()
+    if receipt is None:
+        raise PayeeSaveRejected("PAYNOW_RECEIPT_NOT_SETTLED")
+    if connection.execute(
+        "SELECT 1 FROM beneficiaries WHERE destination_account_id = ? AND directory_kind = 'SAVED'",
+        (receipt["destination_account_id"],),
+    ).fetchone():
+        raise PayeeSaveRejected("PAYEE_ALREADY_SAVED")
+    normalized = nickname.casefold()
+    taken = connection.execute(
+        """
+        SELECT 1 FROM beneficiaries WHERE normalized_alias = :n OR lower(display_name) = :n
+        UNION SELECT 1 FROM beneficiary_aliases WHERE alias = :n
+        """,
+        {"n": normalized},
+    ).fetchone()
+    if taken:
+        raise PayeeSaveRejected("NICKNAME_IN_USE")
+    digits = re.sub(r"\D", "", receipt["destination_reference"] or "")
+    beneficiary_id = f"beneficiary_saved_{secrets.token_hex(8)}"
+    connection.execute(
+        """
+        INSERT INTO beneficiaries (
+          beneficiary_id, display_name, normalized_alias,
+          destination_account_id, masked_destination, directory_kind
+        ) VALUES (?, ?, ?, ?, ?, 'SAVED')
+        """,
+        (beneficiary_id, nickname, normalized, receipt["destination_account_id"], f"PayNow •••• {digits[-4:]}"),
+    )
+    connection.execute(
+        "INSERT INTO payee_registrations (beneficiary_id, added_at, origin) VALUES (?, ?, 'PAYNOW')",
+        (beneficiary_id, now.astimezone(timezone.utc).isoformat()),
+    )
+    return {
+        "beneficiary_id": beneficiary_id,
+        "display_name": nickname,
+        "masked_destination": f"PayNow •••• {digits[-4:]}",
+        "new_payee_until": (now + NEW_PAYEE_WINDOW).astimezone(timezone.utc).isoformat(),
+    }

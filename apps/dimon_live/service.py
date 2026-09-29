@@ -6,7 +6,7 @@ import re
 import sqlite3
 from typing import Any
 
-from . import input_firewall
+from . import input_firewall, no_approval, scam_guard
 from .approval_gateway import ApprovalContext, DeviceAssertion
 from .batch_grounding import bind_batch_evidence
 from .batch_receipts import BatchReceiptDraft, BatchReceiptItemDraft
@@ -111,16 +111,17 @@ def _money_label(minor: int) -> str:
     return f"S${minor / 100:,.2f}"
 
 
-def _payee_options(matches: Any) -> str:
-    """'John Smith ending in 4321 or John Tan ending in 2468' — the account
-    ending lets the user tell same-named payees apart without guessing."""
+def _payee_options(matches: Any, last_payment: Any = None) -> str:
+    """'John Smith ending in 4321 (paid S$20 6 days ago) or John Tan ending in
+    2468 (last paid 6 months ago)' — the account ending and payment history
+    let the user tell same-named payees apart without guessing."""
 
     phrases = []
     for match in matches:
         digits = re.sub(r"\D", "", match.get("masked_destination") or "")
-        phrases.append(
-            f"{match['display_name']} ending in {digits[-4:]}" if digits else match["display_name"]
-        )
+        phrase = f"{match['display_name']} ending in {digits[-4:]}" if digits else match["display_name"]
+        history = last_payment(match) if last_payment and match.get("beneficiary_id") else None
+        phrases.append(f"{phrase} ({history})" if history else phrase)
     if len(phrases) <= 2:
         return " or ".join(phrases)
     return f"{', '.join(phrases[:-1])}, or {phrases[-1]}"
@@ -208,6 +209,13 @@ class ActionService:
             "receipt_choices": [],
             "batch_receipt": None,
         }
+
+    def _payee_options(self, matches: Any) -> str:
+        def last_payment(match: Any) -> str | None:
+            insight = getattr(self.database, "payee_insight", None)
+            return insight(match["beneficiary_id"])["last_payment"] if insight else None
+
+        return _payee_options(matches, last_payment)
 
     def _with_policy_preview(self, response: dict[str, Any]) -> dict[str, Any]:
         """Show KYC, limit, and velocity outcomes before the user signs.
@@ -308,6 +316,19 @@ class ActionService:
                 extra={"firewall": verdict.to_dict()},
             )
         trace.append({"stage": "INPUT_FIREWALL_PASSED"})
+        scam = scam_guard.assess(text)
+        if scam.held:
+            # Held, not drafted: stricter-only rules mean no layer can undo this.
+            return self._nonexecuting(
+                request_id,
+                text,
+                "BLOCKED",
+                "SCAM_SUSPECTED",
+                trace,
+                extra={"scam": scam.to_dict(), "warning": scam_guard.WARNING},
+            )
+        if no_approval.is_balance_inquiry(text) or no_approval.looks_like_money_request(text):
+            return self._answer_without_approval(request_id, text, trace)
         try:
             extracted = self.extractor.extract(text)
         except InferenceFailure as exc:
@@ -331,6 +352,8 @@ class ActionService:
 
         recovered_batch = self._recover_exact_saved_batch(text, intent)
         if recovered_batch is not None:
+            if intent.get("payment_reference"):
+                trace.append({"stage": "BATCH_REFERENCE_NOTED", "reference": intent["payment_reference"]})
             intent = recovered_batch
             extracted = type(extracted)(
                 intent, extracted.raw_output, extracted.latency_ms
@@ -702,7 +725,7 @@ class ActionService:
                 extracted,
                 source,
                 resolution.matches,
-                f"Did you mean {_payee_options(resolution.matches)}?",
+                f"Did you mean {self._payee_options(resolution.matches)}?",
             )
         if resolution.kind == "candidates":
             label = intent["recipient_label"].strip()
@@ -714,8 +737,12 @@ class ActionService:
                 extracted,
                 source,
                 resolution.matches,
-                f"I see {len(resolution.matches)} saved payees named {label}. "
-                f"Did you mean {_payee_options(resolution.matches)}?",
+                (
+                    f"I see {len(resolution.matches)} saved payees named {label}. "
+                    if len(resolution.matches) > 1
+                    else ""
+                )
+                + f"Did you mean {self._payee_options(resolution.matches)}?",
             )
         if resolution.kind == "phonetic":
             return self._receipt_confirmation(
@@ -726,7 +753,7 @@ class ActionService:
                 extracted,
                 source,
                 resolution.matches,
-                f"Did you mean {_payee_options(resolution.matches)}?",
+                f"Did you mean {self._payee_options(resolution.matches)}?",
             )
         if resolution.kind == "missing":
             return self._nonexecuting(
@@ -782,24 +809,44 @@ class ActionService:
         if (
             intent.get("kind") != "BENEFICIARY_TRANSFER"
             or _BATCH_COMMAND_PATTERN.search(text) is None
-            or intent.get("payment_reference") is not None
         ):
             return None
-
-        mentions: list[tuple[int, str, str]] = []
-        for beneficiary in self.database.list_saved_beneficiaries():
-            display_name = beneficiary["display_name"]
-            matches = list(
-                re.finditer(
-                    rf"(?<!\w){re.escape(display_name)}(?!\w)",
-                    text,
-                    re.IGNORECASE,
-                )
-            )
-            if len(matches) > 1:
+        # A reference is allowed only as a closing clause that covers the
+        # whole batch ("... for the flowers"): after every name and amount,
+        # and with no numbers of its own.
+        reference_start = None
+        if intent.get("payment_reference") is not None:
+            evidence = intent.get("reference_evidence") or ""
+            reference_start = text.casefold().rfind(evidence.casefold()) if evidence else -1
+            if reference_start < 0 or re.search(r"\d", evidence):
                 return None
-            if matches:
-                match = matches[0]
+
+        # Each payee may be named by full name, a saved nickname ("my mum"),
+        # or a first name that belongs to exactly one saved payee ("Alicia").
+        # The batch receipt then shows every full name and account ending.
+        saved = self.database.list_saved_beneficiaries()
+        first_names: dict[str, int] = {}
+        for beneficiary in saved:
+            first = beneficiary["display_name"].split()[0].casefold()
+            first_names[first] = first_names.get(first, 0) + 1
+        mentions: list[tuple[int, str, str]] = []
+        spans: list[tuple[int, int]] = []
+        for beneficiary in saved:
+            display_name = beneficiary["display_name"]
+            first = display_name.split()[0]
+            phrases = [display_name, *(beneficiary.get("aliases") or ())]
+            if first_names[first.casefold()] == 1 and first != display_name:
+                phrases.append(first)
+            found: list[re.Match[str]] = []
+            for phrase in sorted(phrases, key=len, reverse=True):
+                for match in re.finditer(rf"(?<!\w){re.escape(phrase)}(?!\w)", text, re.IGNORECASE):
+                    if not any(start < match.end() and match.start() < end for start, end in [*spans, *((m.start(), m.end()) for m in found)]):
+                        found.append(match)
+            if len(found) > 1:
+                return None
+            if found:
+                match = found[0]
+                spans.append((match.start(), match.end()))
                 mentions.append((match.start(), display_name, match.group(0)))
 
         if not 2 <= len(mentions) <= 4:
@@ -810,10 +857,17 @@ class ActionService:
             return None
         if len(amount_mentions) != len(mentions):
             return None
+        if reference_start is not None and reference_start < max(
+            [mention.end for mention in amount_mentions]
+            + [start + len(evidence) for start, _, evidence in mentions]
+        ):
+            return None
         mentions.sort(key=lambda item: item[0])
         proposed_recipient = normalize_evidence(intent.get("recipient_label") or "")
         if proposed_recipient not in {
-            normalize_evidence(display_name) for _, display_name, _ in mentions
+            normalize_evidence(name)
+            for _, display_name, evidence in mentions
+            for name in (display_name, evidence)
         }:
             return None
 
@@ -824,10 +878,10 @@ class ActionService:
             "source_evidence": intent.get("source_evidence"),
             "items": [
                 {
-                    "recipient_label": display_name,
+                    "recipient_label": evidence,
                     "recipient_evidence": evidence,
                 }
-                for _, display_name, evidence in mentions
+                for _, _, evidence in mentions
             ],
             "currency": intent.get("currency"),
             "requested_execution_date": intent.get("requested_execution_date"),
@@ -956,7 +1010,11 @@ class ActionService:
                     request_id, text, "BLOCKED", "UNKNOWN_RECIPIENT", trace,
                     extracted=extracted,
                 )
-            if resolution.kind != "exact" or len(resolution.matches) != 1:
+            # A unique first name ("Alicia") is accepted: the batch receipt
+            # shows every full name and account ending before the signature,
+            # and the validator marks partial names for confirmation.
+            unique = len(resolution.matches) == 1 and resolution.kind in {"exact", "candidates"}
+            if not unique:
                 return self._nonexecuting(
                     request_id, text, "BLOCKED", "AMBIGUOUS_BATCH_BINDING", trace,
                     extracted=extracted,
@@ -1034,6 +1092,8 @@ class ActionService:
                 extracted=grounded_extracted, detail=str(exc),
             )
         trace.append({"stage": "BATCH_CONFIRMATION_REQUIRED"})
+        for public_item, beneficiary in zip(pending["batch_receipt"]["items"], resolved):
+            public_item["masked_destination"] = beneficiary["masked_destination"]
         return {
             **pending,
             "validated_intent": grounded_intent,
@@ -1380,6 +1440,56 @@ class ActionService:
                 extracted=extracted,
                 detail=str(exc),
             )
+
+    def _answer_without_approval(
+        self, request_id: str, text: str, trace: list[dict[str, Any]]
+    ) -> dict[str, Any]:
+        """Balances and payment requests: nothing leaves the user's accounts,
+        so there is no receipt and no signature, and the model is not used."""
+
+        trace.append({"stage": "NO_APPROVAL_NEEDED"})
+        if no_approval.is_balance_inquiry(text):
+            accounts = [
+                account for account in self.database.get_state()["accounts"]
+                if account["is_user_source"]
+            ]
+            answer = ". ".join(
+                f"{account['label'][:1].upper()}{account['label'][1:]}: {_money_label(account['balance_minor'])}" for account in accounts
+            )
+            return self._nonexecuting(
+                request_id, text, "ANSWERED", "BALANCE_INQUIRY", trace,
+                extra={"answer": f"{answer}.", "balances": accounts},
+            )
+        parsed = no_approval.parse_money_request(text, self.database.list_saved_beneficiaries())
+        if parsed.reason_code is not None:
+            question = {
+                "UNKNOWN_RECIPIENT": "Who should I ask for the money? Say a saved payee's name.",
+                "AMBIGUOUS_RECIPIENT": "Which payee should I ask? Say their full name.",
+                "MISSING_AMOUNT": "How much should I ask for?",
+            }.get(parsed.reason_code, "Please say one amount and one saved payee.")
+            return self._nonexecuting(
+                request_id, text, "BLOCKED", parsed.reason_code, trace,
+                extra={"question": question},
+            )
+        beneficiary = parsed.beneficiary
+        money_request_id = self.database.request_money(
+            request_id, beneficiary["beneficiary_id"], parsed.amount_minor
+        )
+        return self._nonexecuting(
+            request_id, text, "ANSWERED", "MONEY_REQUEST_SENT", trace,
+            extra={
+                "answer": (
+                    f"Asked {beneficiary['display_name']} to pay you "
+                    f"{_money_label(parsed.amount_minor)}. Nothing left your account."
+                ),
+                "money_request": {
+                    "money_request_id": money_request_id,
+                    "recipient_display_name": beneficiary["display_name"],
+                    "masked_destination": beneficiary["masked_destination"],
+                    "amount_minor": parsed.amount_minor,
+                },
+            },
+        )
 
     def _nonexecuting(
         self,

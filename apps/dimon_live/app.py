@@ -21,6 +21,7 @@ from .approval_gateway import (
     b64url_decode,
 )
 from .database import Database, ReceiptRejected
+from .payees import PayeeSaveRejected
 from .read_back import build_read_back
 from .tencent_tts import read_back_synthesizer_from_env
 from .inference import InferenceProviders
@@ -102,6 +103,13 @@ class CredentialRegistrationRequest(BaseModel):
 
 class KycCompletionRequest(CredentialRegistrationRequest):
     consent_id: Annotated[str, Field(pattern=r"^consent_[0-9a-f]{32}$")]
+
+
+class SavePayeeRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    receipt_id: Annotated[str, Field(pattern=r"^receipt_[0-9a-f]{32}$")]
+    nickname: Annotated[str, Field(min_length=3, max_length=40)]
 
 
 class ClarificationResponseRequest(BaseModel):
@@ -382,6 +390,14 @@ def create_app(
         except ApprovalRejected as exc:
             raise HTTPException(status_code=400, detail=exc.reason_code) from exc
 
+    @application.post("/api/payees")
+    async def save_payee(request: Request, response: Response, body: SavePayeeRequest):
+        context = resolve(request, response)
+        try:
+            return context.database.save_payee(body.receipt_id, body.nickname)
+        except PayeeSaveRejected as exc:
+            raise HTTPException(status_code=400, detail=exc.reason_code) from exc
+
     async def receipt_challenge(
         kind: str, receipt_id: str, request: Request, response: Response, digest: str
     ) -> dict:
@@ -572,6 +588,31 @@ def create_app(
                 raise HTTPException(status_code=exc.status_code, detail=exc.reason_code) from exc
         return HTMLResponse(
             (STATIC_DIR / "index.html").read_text(encoding="utf-8"),
+            headers={"Cache-Control": "no-store"},
+        )
+
+    @application.get("/presenter", include_in_schema=False)
+    async def presenter(request: Request):
+        """Split screen: the phone beside a live, plain-language audit log."""
+
+        if manager.legacy_database is None:
+            try:
+                manager._assert_origin(
+                    request.headers.get("origin"),
+                    request.headers.get("host", "").lower(),
+                )
+            except SessionBoundaryError as exc:
+                raise HTTPException(status_code=exc.status_code, detail=exc.reason_code) from exc
+        return HTMLResponse(
+            (STATIC_DIR / "presenter.html").read_text(encoding="utf-8"),
+            headers={"Cache-Control": "no-store"},
+        )
+
+    @application.get("/static/presenter.js", include_in_schema=False)
+    async def presenter_script():
+        return Response(
+            (STATIC_DIR / "presenter.js").read_text(encoding="utf-8"),
+            media_type="application/javascript",
             headers={"Cache-Control": "no-store"},
         )
 

@@ -1,3 +1,4 @@
+[hidden] { display: none !important; }
 :root {
   --ink: #0a0e10;
   --mineral: #11181b;
@@ -55,7 +56,7 @@ button { cursor: pointer; touch-action: manipulation; }
 .workspace { width: min(1500px, 100%); margin: 0 auto; display: grid; grid-template-columns: minmax(350px, .82fr) minmax(520px, 1.18fr); min-height: calc(100vh - 112px); }
 .command-column, .evidence-column { min-width: 0; padding: clamp(26px, 4vw, 58px); }
 .command-column { border-right: 1px solid var(--line); display: flex; flex-direction: column; gap: 40px; }
-.evidence-column { display: grid; align-content: start; gap: 20px; background: rgba(17, 24, 27, .58); }
+.evidence-column { display: grid; grid-template-columns: minmax(0, 1fr); align-content: start; gap: 20px; background: rgba(17, 24, 27, .58); }
 .eyebrow { margin: 0 0 10px; color: var(--signal); font: 11px/1 ui-monospace, monospace; letter-spacing: .13em; text-transform: uppercase; }
 h1, h2, p { margin-top: 0; }
 h1 { margin-bottom: 18px; font-family: "Arial Narrow", "Roboto Condensed", sans-serif; font-size: clamp(48px, 6vw, 88px); line-height: .88; letter-spacing: -.04em; font-stretch: condensed; }
@@ -136,6 +137,10 @@ audio { width: 100%; max-width: 360px; height: 32px; margin-top: 14px; }
 .locked-facts span { min-width: 100px; }
 .locked-facts small { display: block; margin-bottom: 4px; color: var(--muted); font: 700 9px/1 ui-monospace, monospace; letter-spacing: .08em; text-transform: uppercase; }
 .locked-facts strong { font-size: 12px; }
+.save-payee { display: grid; gap: 10px; padding: 13px; border: 1px solid rgba(241, 202, 116, .42); background: rgba(241, 202, 116, .045); }
+.save-payee label { display: grid; gap: 6px; font-size: 13px; }
+.save-payee input { padding: 9px 10px; border: 1px solid rgba(255, 255, 255, .2); border-radius: 6px; background: rgba(0, 0, 0, .25); color: inherit; font: inherit; }
+.save-payee-note { opacity: .75; line-height: 1.4; }
 .receipt-choice { padding: 12px; border: 1px solid rgba(241, 202, 116, .32); background: rgba(241, 202, 116, .035); }
 .batch-receipt-card { padding: 13px; border: 1px solid rgba(120, 224, 207, .42); background: rgba(120, 224, 207, .035); }
 .batch-items { display: grid; gap: 7px; }
@@ -195,7 +200,7 @@ button:focus-visible, textarea:focus-visible, a:focus-visible { outline: 2px sol
 @keyframes balance-settle { 35% { color: var(--signal); transform: translateY(-3px); } }
 
 @media (max-width: 980px) {
-  .workspace { grid-template-columns: 1fr; }
+  .workspace { grid-template-columns: minmax(0, 1fr); }
   .command-column { border-right: 0; border-bottom: 1px solid var(--line); }
   h1 { font-size: clamp(52px, 12vw, 78px); }
   .command-form { margin-top: 0; }

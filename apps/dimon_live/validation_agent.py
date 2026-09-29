@@ -39,7 +39,22 @@ _TENS = {
 }
 _SCALES = {"hundred": 100, "thousand": 1000}
 _NUMBER_WORD = "|".join(sorted([*_UNITS, *_TENS, *_SCALES, "a", "and"], key=len, reverse=True))
-_MONEY_NOUN = r"(?:singapore\s+)?(?:dollars?|bucks|sgd)"
+_MONEY_NOUN = r"(?:singapore\s+)?(?:dollars?|bucks?|sgd)"
+# Unmarked amounts count only right after a name-like word in a payment
+# sentence ("pay alicia 10", "transfer my mum fifty"); this is the validator's
+# own reading, written separately from the drafting pipeline's.
+_PAY_VERB = re.compile(r"\b(send|pay|transfer|give|pass|bank in)\b")
+_UNMARKED = re.compile(
+    r"\b(?P<word>[a-z]+)\s+(?P<num>\d{1,6}(?:\.\d{1,2})?|(?:(?:" + "|".join([*_UNITS, *_TENS])
+    + r")(?:[\s-]+(?:" + "|".join([*_UNITS, *_TENS, "hundred", "thousand", "and"]) + r"))*))"
+    r"(?=\s+(?P<next>[a-z%]+)|\s*[.,!?]|\s*$)"
+)
+_NOT_NAMES = {
+    "for", "of", "at", "by", "with", "the", "a", "an", "in", "on", "to", "and", "or", "than",
+    "about", "around", "only", "just", "me", "help", "can", "lah", "paynow", "number", "no",
+    "block", "unit", "floor", "room", "table", "bus", "send", "pay", "transfer", "give", "pass",
+}
+_NOT_MONEY_NEXT = {"cent", "cents", "x", "times", "pax", "people", "persons", "percent", "%", "pieces", "pcs", "items"}
 _DIGIT_MONEY = re.compile(
     r"(?:(?:s\$|\$|sgd)\s*(?P<pre>\d[\d,]*(?:\.\d{1,2})?)(?P<prek>k)?)"
     r"|(?:(?P<post>\d[\d,]*(?:\.\d{1,2})?)(?P<postk>k)?\s*" + _MONEY_NOUN + r")"
@@ -95,6 +110,20 @@ def transcript_amounts(text: str) -> set[int]:
             amounts.add(value * 100)
     if _GRAND.search(normalized):
         amounts.add(100000)
+    if not amounts and _PAY_VERB.search(normalized):
+        for match in _UNMARKED.finditer(normalized):
+            word, following = match.group("word"), match.group("next") or ""
+            verb_first = _PAY_VERB.fullmatch(word) is not None and following == "to"
+            if (word in _NOT_NAMES and not verb_first) or following in _NOT_MONEY_NEXT:
+                continue
+            number = match.group("num")
+            if number[0].isdigit():
+                whole, _, cents = number.partition(".")
+                amounts.add(int(whole) * 100 + int((cents + "00")[:2]))
+            else:
+                value = _words_to_number(number)
+                if value:
+                    amounts.add(value * 100)
     return amounts
 
 
@@ -107,6 +136,7 @@ def _mentions(text: str, phrase: str) -> bool:
 class DirectoryEntry:
     beneficiary_id: str
     display_name: str
+    aliases: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -164,10 +194,15 @@ def _audit_recipient(
         return FieldAudit(field, "MISMATCH", item.paynow_proxy, "not stated", "PayNow number differs from the user's words")
     if _mentions(text, item.recipient_display_name):
         return FieldAudit(field, "MATCH", item.recipient_display_name, item.recipient_display_name, "full name stated")
+    own = next((entry for entry in directory if entry.beneficiary_id == item.beneficiary_id), None)
+    nickname = next((alias for alias in (own.aliases if own else ()) if _mentions(text, alias)), None)
+    if nickname:
+        return FieldAudit(field, "MATCH", item.recipient_display_name, nickname, "saved nickname stated")
     others = [
         entry.display_name
         for entry in directory
-        if entry.beneficiary_id != item.beneficiary_id and _mentions(text, entry.display_name)
+        if entry.beneficiary_id != item.beneficiary_id
+        and (_mentions(text, entry.display_name) or any(_mentions(text, alias) for alias in entry.aliases))
     ]
     tokens = [token for token in normalize(item.recipient_display_name).split() if len(token) > 1]
     partial = [token for token in tokens if _mentions(text, token)]

@@ -87,8 +87,14 @@ def audit_stored_receipt(
                 (receipt_id,),
             ).fetchall()
         )
+    aliases: dict[str, list[str]] = {}
+    try:
+        for alias, beneficiary_id in connection.execute("SELECT alias, beneficiary_id FROM beneficiary_aliases"):
+            aliases.setdefault(beneficiary_id, []).append(alias)
+    except sqlite3.OperationalError:
+        pass
     directory = [
-        DirectoryEntry(entry["beneficiary_id"], entry["display_name"])
+        DirectoryEntry(entry["beneficiary_id"], entry["display_name"], tuple(aliases.get(entry["beneficiary_id"], ())))
         for entry in connection.execute("SELECT beneficiary_id, display_name FROM beneficiaries")
     ]
     source_labels = [

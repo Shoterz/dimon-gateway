@@ -667,6 +667,41 @@ class ActionServiceTests(unittest.TestCase):
         self.assertEqual(executed["transaction_id"], replay["transaction_id"])
         self.assertEqual(len(self.database.get_state()["transactions"]), 1)
 
+    def test_settled_paynow_recipient_can_be_saved_as_a_capped_new_payee(self):
+        from apps.dimon_live.payees import PayeeSaveRejected
+
+        service = self.service_for(PAYNOW_INTENT)
+        choice = service.process(REQUEST_ID, "PayNow 8695 2933 ten dollars for flowers")["receipt_choices"][0]
+        with self.assertRaises(PayeeSaveRejected) as unsettled:
+            self.database.save_payee(choice["receipt_id"], "Jay")
+        self.assertEqual(unsettled.exception.reason_code, "PAYNOW_RECEIPT_NOT_SETTLED")
+        self.signed_approve(service, choice, assertion=self.sign(choice), code=self.code_for(choice))
+
+        for nickname, reason in (("Alicia Powell", "NICKNAME_IN_USE"), ("mum", "NICKNAME_IN_USE"), ("J4y!", "INVALID_NICKNAME")):
+            with self.assertRaises(PayeeSaveRejected) as rejected:
+                self.database.save_payee(choice["receipt_id"], nickname)
+            self.assertEqual(rejected.exception.reason_code, reason)
+        saved = self.database.save_payee(choice["receipt_id"], "Jay")
+        self.assertEqual(saved["masked_destination"], "PayNow •••• 2933")
+        with self.assertRaises(PayeeSaveRejected) as twice:
+            self.database.save_payee(choice["receipt_id"], "Jay Two")
+        self.assertEqual(twice.exception.reason_code, "PAYEE_ALREADY_SAVED")
+
+        intent = {
+            **GOLDEN_INTENT, "recipient_label": "Jay", "recipient_evidence": "Jay",
+            "source_account_ref": None, "source_evidence": None,
+        }
+        within = self.service_for(intent).process(
+            "00000000-0000-4000-8000-000000000091", "Send Jay S$20"
+        )["receipt_choices"][0]
+        self.assertEqual(within["recipient_display_name"], "Jay")
+        self.assertTrue(within["payee"]["new_payee"])
+        self.assertTrue(within["policy"]["requires_out_of_band"])
+        over_cap = self.service_for(intent).process(
+            "00000000-0000-4000-8000-000000000092", "Send Jay S$150"
+        )
+        self.assertEqual(over_cap["reason_code"], "NEW_PAYEE_LIMIT_EXCEEDED")
+
     def test_missing_amount_paynow_reuses_lookup_without_second_model_call(self):
         from apps.dimon_live.service import ActionService
 
@@ -830,7 +865,7 @@ class ActionServiceTests(unittest.TestCase):
 
         self.assertEqual(result["outcome"], "CLARIFICATION_REQUEST")
         self.assertEqual(result["reason_code"], "CLOSE_RECIPIENT_MATCH")
-        self.assertEqual(result["question"], "Did you mean Alicia Powell ending in 9876?")
+        self.assertEqual(result["question"], "Did you mean Alicia Powell ending in 9876 (paid S$12 3 days ago)?")
         self.assertEqual(
             result["receipt_choices"][0]["recipient_display_name"],
             "Alicia Powell",
@@ -856,7 +891,8 @@ class ActionServiceTests(unittest.TestCase):
         self.assertEqual(
             result["question"],
             "I see 2 saved payees named John. "
-            "Did you mean John Smith ending in 4321 or John Tan ending in 2468?",
+            "Did you mean John Smith ending in 4321 (paid S$20 6 days ago) "
+            "or John Tan ending in 2468 (last paid 6 months ago)?",
         )
         self.assertEqual(self.database.get_state()["transactions"], [])
 

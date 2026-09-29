@@ -42,10 +42,13 @@ from .payees import (
     describe_last_payment,
     describe_typical,
     history as payee_history,
+    PayeeSaveRejected,
     is_new_payee,
+    save_paynow_payee,
     seed_payees,
     unusual_amount,
 )
+from .no_approval import REQUESTS_SCHEMA, record_money_request
 from .validation_store import VALIDATION_SCHEMA, record_validation
 from .signing_store import (
     SIGNING_SCHEMA,
@@ -404,6 +407,7 @@ class Database:
             connection.executescript(POLICY_SCHEMA)
             connection.executescript(AUDIT_SCHEMA)
             connection.executescript(PAYEE_SCHEMA)
+            connection.executescript(REQUESTS_SCHEMA)
             seed_profile(connection, DEMO_USER_ID, self._clock(), kyc_status="PENDING")
             kyc.migrate(connection)
             self._apply_v2_migrations(connection)
@@ -559,6 +563,7 @@ class Database:
                 connection.execute("DELETE FROM paynow_proxies")
                 connection.execute("DELETE FROM review_receipts")
                 connection.execute("DELETE FROM action_attempts")
+                connection.execute("DELETE FROM money_requests")
                 connection.execute("DELETE FROM beneficiary_aliases")
                 connection.execute("DELETE FROM prior_payments")
                 connection.execute("DELETE FROM payee_registrations")
@@ -2367,6 +2372,43 @@ class Database:
             connection.commit()
             return report.to_dict()
 
+    def save_payee(self, receipt_id: str, nickname: str, *, now: datetime | None = None) -> dict[str, Any]:
+        """Save a settled PayNow recipient under a nickname (new-payee rules apply)."""
+
+        now = now or self._clock()
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            saved = save_paynow_payee(connection, receipt_id=receipt_id, nickname=nickname, now=now)
+            audit_log.append(
+                connection,
+                "PAYEE_SAVED",
+                {"beneficiary_id": saved["beneficiary_id"], "origin": "PAYNOW"},
+                now=now,
+                receipt_id=receipt_id,
+            )
+            connection.commit()
+            return saved
+
+    def request_money(self, request_id: str, beneficiary_id: str, amount_minor: int) -> str:
+        """Record a request for someone to pay the user. Nothing is debited."""
+
+        now = self._clock()
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            money_request_id = record_money_request(
+                connection, request_id=request_id, beneficiary_id=beneficiary_id,
+                amount_minor=amount_minor, now=now,
+            )
+            audit_log.append(
+                connection,
+                "MONEY_REQUESTED",
+                {"money_request_id": money_request_id, "beneficiary_id": beneficiary_id, "amount_minor": amount_minor},
+                now=now,
+                request_id=request_id,
+            )
+            connection.commit()
+            return money_request_id
+
     def start_myinfo(self, user_id: str = DEMO_USER_ID, *, now: datetime | None = None) -> dict[str, Any]:
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -2900,6 +2942,7 @@ class Database:
                 "masked_destination": beneficiary["masked_destination"],
                 "amount_minor": row["amount_minor"],
                 "currency": row["currency"],
+                "destination_kind": row["destination_kind"] if "destination_kind" in row.keys() else None,
             },
         }
         if approval is not None:

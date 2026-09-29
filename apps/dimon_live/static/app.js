@@ -146,6 +146,12 @@ const stageCopy = {
   UNUSUAL_AMOUNT_UNCONFIRMED: ["Amount not confirmed", "Nothing moved"],
   KYC_PENDING: ["KYC incomplete", "No ledger mutation"],
   KYC_NOT_COMPLETED: ["Identity check not finished", "Nothing moved"],
+  SCAM_SUSPECTED: ["Held: possible scam", "Stricter-only rule · nothing drafted"],
+  NO_APPROVAL_NEEDED: ["No approval needed", "Nothing leaves your account"],
+  BATCH_RECIPIENTS_RECOVERED_FROM_DIRECTORY: ["Several payments found", "Each name matched to one saved payee"],
+  BATCH_REFERENCE_NOTED: ["Reference noted", "Applies to the whole batch"],
+  BALANCE_INQUIRY: ["Balance read", "Read-only · no model, no signature"],
+  MONEY_REQUEST_SENT: ["Payment request sent", "You receive money · no signature"],
   APPROVAL_DEVICE_NOT_BOUND: ["Not your registered device", "Nothing moved"],
   KYC_EXPIRED: ["KYC expired", "No ledger mutation"],
   KYC_REJECTED: ["KYC rejected", "No ledger mutation"],
@@ -629,6 +635,50 @@ function appendEvidenceLink(receiptId) {
   ui.outcomeDetail.append(" ", link);
 }
 
+// After a PayNow transfer settles, the recipient can be saved under a name.
+// The server registers it as a new payee: S$100 cap and a one-time code for
+// the first 24 hours.
+function offerSavePayee(receiptId, action) {
+  ui.candidateList.hidden = false;
+  ui.candidateList.innerHTML = `<form class="save-payee">
+    <p class="match-label">Save ${escapeHtml(action.recipient_display_name)} (${escapeHtml(action.masked_destination || "PayNow")}) as a payee?</p>
+    <label>Name to call them <input name="nickname" maxlength="40" minlength="3" required placeholder="e.g. Jason" autocomplete="off"></label>
+    <button type="submit" class="candidate-choice">Save payee</button>
+    <small class="save-payee-note">New payees are limited to S$100 per transfer and need a one-time code for their first 24 hours.</small>
+  </form>`;
+  const form = ui.candidateList.querySelector("form");
+  form.addEventListener("submit", async event => {
+    event.preventDefault();
+    const nickname = form.nickname.value.trim();
+    const button = form.querySelector("button");
+    button.disabled = true;
+    try {
+      const response = await fetch("/api/payees", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({receipt_id: receiptId, nickname}),
+      });
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        const reasons = {
+          NICKNAME_IN_USE: "That name is already used by another payee.",
+          INVALID_NICKNAME: "Use letters and spaces only (3–40 characters).",
+          PAYEE_ALREADY_SAVED: "This PayNow recipient is already saved.",
+        };
+        form.querySelector(".save-payee-note").textContent = reasons[body.detail] || "Could not save this payee.";
+        button.disabled = false;
+        return;
+      }
+      form.innerHTML = `<p class="match-label">Saved as ${escapeHtml(body.display_name)}</p>
+        <small class="save-payee-note">You can now say “Pay ${escapeHtml(body.display_name)} 20”. Limited to S$100 with a one-time code until ${escapeHtml(new Date(body.new_payee_until).toLocaleString())}.</small>`;
+      await loadState();
+    } catch {
+      form.querySelector(".save-payee-note").textContent = "Could not reach the gateway. Try again.";
+      button.disabled = false;
+    }
+  });
+}
+
 function renderApprovalRefusal(reasonCode, detail) {
   setOutcome("blocked", "!", "Approval not signed", reasonCode.replaceAll("_", " ").toLowerCase(), detail);
   setSettlement("blocked", "Nothing moved", [["Result", reasonLabel(reasonCode)]],
@@ -744,6 +794,15 @@ function renderResult(result, elapsedMs) {
   if (result.outcome === "EXECUTED_SYNTHETIC_TRANSFER") {
     setOutcome("success", "✓", "Synthetic transfer settled", "The ledger moved exactly once.", `${formatSgd(result.amount_minor)} moved to ${result.resolved_action.recipient_display_name}. The database recorded two balanced entries.`);
     if (result.receipt?.receipt_id) appendEvidenceLink(result.receipt.receipt_id);
+    if (result.resolved_action.destination_kind === "PAYNOW_MOBILE" && result.receipt?.receipt_id) {
+      offerSavePayee(result.receipt.receipt_id, result.resolved_action);
+    }
+  } else if (result.outcome === "ANSWERED") {
+    const request = result.money_request;
+    setOutcome("success", "i", "No approval needed", result.answer || "Done.",
+      request
+        ? `${request.recipient_display_name} (${request.masked_destination}) will be asked to pay you ${formatSgd(request.amount_minor)}. Requests never move money out, so no signature is needed.`
+        : "Checking a balance is read-only, so no signature is needed.");
   } else if (result.outcome === "EXECUTED_SYNTHETIC_BATCH") {
     const itemCount = (result.resolved_actions || []).length;
     setOutcome("success", "✓", "Synthetic batch settled", "The complete plan moved exactly once.", `${formatSgd(result.amount_minor)} was split across ${itemCount} transfers in one atomic database transaction.`);
@@ -759,7 +818,7 @@ function renderResult(result, elapsedMs) {
       <div class="batch-items">
         ${receipt.items.map(item => `<div class="batch-item-row">
           <span><small>From</small><strong>${escapeHtml(receipt.source_label)}</strong></span>
-          <span><small>To</small><strong>${escapeHtml(item.recipient_display_name)}</strong></span>
+          <span><small>To</small><strong>${escapeHtml(item.recipient_display_name)}</strong>${item.masked_destination ? ` <em class="masked-account">${escapeHtml(item.masked_destination)}</em>` : ""}</span>
           <span><small>Amount</small><strong>${escapeHtml(formatSgd(item.amount_minor))}</strong></span>
         </div>`).join("")}
       </div>
@@ -808,6 +867,8 @@ function renderResult(result, elapsedMs) {
         await approveReceipt(choice);
       });
     });
+  } else if (result.outcome === "BLOCKED" && result.reason_code === "SCAM_SUSPECTED") {
+    setOutcome("blocked", "!", "Held: this looks like a scam", "Nothing was sent.", result.warning || "");
   } else if (result.outcome === "BLOCKED" && result.reason_code === "VALIDATION_FROZEN") {
     const discrepancies = (result.discrepancies || [])
       .map(field => `${field.field.replace(/^items\[\d+\]\./, "")}: drafted ${field.draft_value}, you said ${field.observed}`)
