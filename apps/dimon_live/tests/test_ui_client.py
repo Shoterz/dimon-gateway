@@ -144,6 +144,42 @@ class ReceiptApprovalClientTests(unittest.TestCase):
             {"delay": 20000, "fired": 1, "cancelled": None},
         )
 
+    def test_voice_deadline_default_timers_keep_the_global_receiver(self):
+        program = f"""
+          // Browsers throw "Illegal invocation" when timers get a foreign
+          // receiver; make Node's timers equally strict.
+          const nativeSet = globalThis.setTimeout;
+          const nativeClear = globalThis.clearTimeout;
+          globalThis.setTimeout = function (callback, delay) {{
+            if (this !== undefined && this !== globalThis) throw new TypeError("Illegal invocation");
+            return nativeSet(callback, delay);
+          }};
+          globalThis.clearTimeout = function (token) {{
+            if (this !== undefined && this !== globalThis) throw new TypeError("Illegal invocation");
+            return nativeClear(token);
+          }};
+          const {{ VoiceDeadline }} = await import({json.dumps(VOICE_CAPTURE_MODULE.as_uri())});
+          const deadline = new VoiceDeadline();
+          let fired = 0;
+          deadline.arm(1, () => {{ fired += 1; }});
+          await new Promise(resolve => nativeSet(resolve, 20));
+          deadline.arm(20000, () => {{ fired += 1; }});
+          deadline.clear();
+          process.stdout.write(JSON.stringify({{ fired }}));
+        """
+
+        completed = subprocess.run(
+            ["node", "--input-type=module", "--eval", program],
+            cwd=PROJECT_ROOT,
+            capture_output=True,
+            check=False,
+            text=True,
+            encoding="utf-8",
+        )
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(json.loads(completed.stdout), {"fired": 1})
+
     def test_paynow_account_display_exposes_the_demo_proxy(self):
         program = f"""
           import {{ accountDisplay }} from {json.dumps(ACCOUNT_DISPLAY_MODULE.as_uri())};

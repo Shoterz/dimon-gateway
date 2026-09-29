@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import threading
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -44,6 +45,33 @@ class WhisperCppServiceTests(unittest.TestCase):
             self.assertEqual(final, {"type": "final", "text": "send John Smith S$5"})
 
         self.assertEqual(engine.calls, [32000, 32000])
+
+    def test_slow_partial_decode_keeps_reading_and_skips_overlapping_windows(self) -> None:
+        release = threading.Event()
+
+        class SlowEngine(FakeEngine):
+            def transcribe(self, pcm16_audio: bytes, *, max_new_tokens: int = 256) -> str:
+                if not self.calls:
+                    release.wait(5)
+                return super().transcribe(pcm16_audio, max_new_tokens=max_new_tokens)
+
+        engine = SlowEngine(["send", "send John Smith"])
+        client = TestClient(create_app(engine))
+        with client.websocket_connect("/v1/stream") as websocket:
+            websocket.receive_json()  # ready
+            # Three seconds of audio arrive while the first partial is decoding.
+            for _ in range(3):
+                websocket.send_bytes(b"\x00\x01" * 16000)
+            release.set()
+            websocket.send_text(json.dumps({"type": "commit"}))
+            self.assertEqual(websocket.receive_json(), {"type": "partial", "text": "send"})
+            self.assertEqual(
+                websocket.receive_json(), {"type": "final", "text": "send John Smith"}
+            )
+
+        # One partial for the first second, then the final over all audio;
+        # the windows that arrived mid-decode were skipped, not queued.
+        self.assertEqual(engine.calls, [32000, 96000])
 
     def test_stream_reports_error_without_engine_exception_text(self) -> None:
         class FailingEngine:

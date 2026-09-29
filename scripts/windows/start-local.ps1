@@ -70,8 +70,12 @@ foreach ($service in $services) {
 
 $port = if ($env:DIMON_PORT) { $env:DIMON_PORT } else { "8890" }
 $appUrl = "http://127.0.0.1:$port"
-Write-Host "app: starting on $appUrl"
-Start-Window "app" "uv run dimon-serve"
+if (Test-Healthy "$appUrl/static/app.css") {
+    Write-Host "app: already running"
+} else {
+    Write-Host "app: starting on $appUrl"
+    Start-Window "app" "uv run dimon-serve"
+}
 
 $deadline = (Get-Date).AddSeconds(60)
 while (-not (Test-Healthy "$appUrl/static/app.css")) {

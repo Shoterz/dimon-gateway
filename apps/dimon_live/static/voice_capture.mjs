@@ -8,7 +8,12 @@ export function createVoiceAudioContext(browserWindow = window) {
 }
 
 export class VoiceDeadline {
-  constructor(schedule = setTimeout, cancel = clearTimeout) {
+  // Wrap the timer globals: browsers throw "Illegal invocation" when
+  // setTimeout is called as a method of this object.
+  constructor(
+    schedule = (callback, delayMs) => setTimeout(callback, delayMs),
+    cancel = token => clearTimeout(token),
+  ) {
     this.schedule = schedule;
     this.cancel = cancel;
     this.token = null;

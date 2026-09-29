@@ -80,6 +80,25 @@ def create_app(engine):
         await websocket.send_text(json.dumps({"type": "ready", "sample_rate": SAMPLE_RATE}))
         buffer = bytearray()
         since_partial = 0
+        # A CPU decode takes seconds; running it inline would stop reading
+        # audio, back up the socket, and starve keepalive pings. Decode
+        # partials in the background instead, one at a time, and skip
+        # intervals that arrive while one is still running.
+        partial_task: asyncio.Task | None = None
+
+        async def send_partial(window: bytes) -> None:
+            try:
+                text = await asyncio.to_thread(
+                    engine.transcribe, window, max_new_tokens=PARTIAL_MAX_NEW_TOKENS
+                )
+            except Exception:
+                await websocket.send_text(json.dumps(
+                    {"type": "error", "reason_code": "TRANSCRIPTION_UNAVAILABLE"}
+                ))
+                await websocket.close()
+                return
+            await websocket.send_text(json.dumps({"type": "partial", "text": text}))
+
         try:
             while True:
                 message = await websocket.receive()
@@ -89,20 +108,16 @@ def create_app(engine):
                     chunk = message["bytes"]
                     buffer.extend(chunk)
                     since_partial += len(chunk)
-                    if since_partial >= PARTIAL_INTERVAL_BYTES:
+                    if since_partial >= PARTIAL_INTERVAL_BYTES and (
+                        partial_task is None or partial_task.done()
+                    ):
                         since_partial = 0
-                        window = bytes(buffer[-WINDOW_BYTES:])
-                        try:
-                            text = await asyncio.to_thread(
-                                engine.transcribe, window, max_new_tokens=PARTIAL_MAX_NEW_TOKENS
-                            )
-                        except Exception:
-                            await websocket.send_text(json.dumps(
-                                {"type": "error", "reason_code": "TRANSCRIPTION_UNAVAILABLE"}
-                            ))
-                            return
-                        await websocket.send_text(json.dumps({"type": "partial", "text": text}))
+                        partial_task = asyncio.create_task(
+                            send_partial(bytes(buffer[-WINDOW_BYTES:]))
+                        )
                     continue
+                if partial_task is not None:
+                    await partial_task
                 raw_text = message.get("text")
                 if raw_text is None:
                     await websocket.send_text(json.dumps({"type": "error", "reason_code": "MALFORMED_FRAME"}))
@@ -126,6 +141,9 @@ def create_app(engine):
                 return
         except Exception:
             return
+        finally:
+            if partial_task is not None and not partial_task.done():
+                partial_task.cancel()
 
     return app
 
