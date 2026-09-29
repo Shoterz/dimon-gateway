@@ -23,6 +23,14 @@ from .name_resolution import (
     rank_name_candidates,
     rank_phonetic_candidates,
 )
+from .risk_policy import (
+    POLICY_SCHEMA,
+    PolicyRejected,
+    evaluate as evaluate_policy,
+    mock_token_code,
+    seed_profile,
+    verify_out_of_band,
+)
 from .validation_store import VALIDATION_SCHEMA, record_validation
 from .signing_store import (
     SIGNING_SCHEMA,
@@ -378,6 +386,8 @@ class Database:
             connection.executescript(BATCH_SCHEMA)
             connection.executescript(SIGNING_SCHEMA)
             connection.executescript(VALIDATION_SCHEMA)
+            connection.executescript(POLICY_SCHEMA)
+            seed_profile(connection, DEMO_USER_ID, self._clock())
             self._apply_v2_migrations(connection)
             count = connection.execute("SELECT COUNT(*) FROM accounts").fetchone()[0]
             if count == 0:
@@ -511,6 +521,7 @@ class Database:
                 connection.execute("DELETE FROM approval_signatures")
                 connection.execute("DELETE FROM approval_challenges")
                 connection.execute("DELETE FROM validation_records")
+                connection.execute("DELETE FROM out_of_band_attempts")
                 connection.execute("DELETE FROM batch_ledger_entries")
                 connection.execute("DELETE FROM batch_receipt_executions")
                 connection.execute("DELETE FROM batch_ledger_transactions")
@@ -928,6 +939,7 @@ class Database:
         *,
         assertion: DeviceAssertion | None,
         context: ApprovalContext | None,
+        out_of_band_code: str | None = None,
         now: datetime | None = None,
     ) -> dict[str, Any]:
         with self._connect() as connection:
@@ -1036,6 +1048,15 @@ class Database:
                 )
                 if validation.verdict == "FROZEN":
                     raise ReceiptRejected("VALIDATION_FROZEN", persist_status=True)
+                self._enforce_policy(
+                    connection,
+                    user_id=user_id,
+                    receipt_id=receipt_id,
+                    receipt_digest=row["receipt_digest"],
+                    item_amounts=tuple(item["amount_minor"] for item in item_dicts),
+                    out_of_band_code=out_of_band_code,
+                    now=approved_at,
+                )
                 source = connection.execute(
                     """
                     SELECT account_id, label, balance_minor, currency
@@ -1931,6 +1952,109 @@ class Database:
             connection.commit()
             return result
 
+    @staticmethod
+    def _enforce_policy(
+        connection: sqlite3.Connection,
+        *,
+        user_id: str,
+        receipt_id: str,
+        receipt_digest: str,
+        item_amounts: tuple[int, ...],
+        out_of_band_code: str | None,
+        now: datetime,
+    ) -> None:
+        """Authoritative KYC, limit, velocity, and out-of-band check."""
+
+        try:
+            decision = evaluate_policy(
+                connection, user_id=user_id, item_amounts=item_amounts, now=now
+            )
+            if decision.requires_out_of_band:
+                verify_out_of_band(
+                    connection,
+                    user_id=user_id,
+                    receipt_id=receipt_id,
+                    receipt_digest=receipt_digest,
+                    code=out_of_band_code,
+                )
+        except PolicyRejected as exc:
+            raise ReceiptRejected(exc.reason_code, persist_status=exc.persist) from None
+
+    def policy_preview(
+        self, item_amounts: tuple[int, ...], *, user_id: str = DEMO_USER_ID
+    ) -> dict[str, Any]:
+        """Early, non-authoritative check shown with a draft."""
+
+        with self._connect() as connection:
+            try:
+                decision = evaluate_policy(
+                    connection, user_id=user_id, item_amounts=item_amounts, now=self._clock()
+                )
+            except PolicyRejected as exc:
+                return {"allowed": False, "reason_code": exc.reason_code}
+            return {"allowed": True, **decision.to_dict()}
+
+    def customer_profile(self, user_id: str = DEMO_USER_ID) -> dict[str, Any]:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT kyc_status, kyc_expires_at, per_transaction_limit_minor,
+                       daily_limit_minor, out_of_band_threshold_minor,
+                       velocity_max_transfers, micro_transfer_ceiling_minor,
+                       velocity_max_micro_transfers
+                FROM customer_profiles WHERE user_id = ?
+                """,
+                (user_id,),
+            ).fetchone()
+            return dict(row) if row else {}
+
+    def mock_token_display(
+        self, *, user_id: str = DEMO_USER_ID, now: datetime | None = None
+    ) -> list[dict[str, Any]]:
+        """What the simulated hardware token shows: one code per high-value
+        receipt awaiting approval, alongside the amount and payee it covers."""
+
+        current = (now or self._clock()).astimezone(timezone.utc)
+        with self._connect() as connection:
+            threshold = connection.execute(
+                "SELECT out_of_band_threshold_minor FROM customer_profiles WHERE user_id = ?",
+                (user_id,),
+            ).fetchone()
+            if threshold is None:
+                return []
+            rows = [
+                *connection.execute(
+                    """
+                    SELECT receipt_id, receipt_digest, amount_minor AS total_minor,
+                           recipient_display_name AS payee, expires_at
+                    FROM review_receipts
+                    WHERE user_id = ? AND status = 'AWAITING_CONFIRMATION' AND amount_minor >= ?
+                    """,
+                    (user_id, threshold[0]),
+                ),
+                *connection.execute(
+                    """
+                    SELECT receipt_id, receipt_digest, total_minor,
+                           'batch of payees' AS payee, expires_at
+                    FROM batch_review_receipts
+                    WHERE user_id = ? AND status = 'AWAITING_CONFIRMATION' AND total_minor >= ?
+                    """,
+                    (user_id, threshold[0]),
+                ),
+            ]
+            return [
+                {
+                    "receipt_id": row["receipt_id"],
+                    "payee": row["payee"],
+                    "total_minor": row["total_minor"],
+                    "code": mock_token_code(
+                        connection, user_id, row["receipt_id"], row["receipt_digest"]
+                    ),
+                }
+                for row in rows
+                if datetime.fromisoformat(row["expires_at"]) > current
+            ]
+
     def audit_receipt(
         self, kind: str, receipt_id: str, *, now: datetime | None = None
     ) -> dict[str, Any]:
@@ -2034,6 +2158,15 @@ class Database:
                         ).fetchall()
                     ]
                     total_minor = row["total_minor"]
+                try:
+                    decision = evaluate_policy(
+                        connection,
+                        user_id=user_id,
+                        item_amounts=tuple(item["amount_minor"] for item in items),
+                        now=issued_at,
+                    )
+                except PolicyRejected as exc:
+                    raise ReceiptRejected(exc.reason_code) from None
                 challenge = issue_challenge(
                     connection,
                     purpose=purpose,
@@ -2058,6 +2191,7 @@ class Database:
                 "items": items,
                 "receipt_expires_at": row["expires_at"],
                 "validation": validation.to_dict(),
+                "requires_out_of_band": decision.requires_out_of_band,
             },
         }
 
@@ -2069,6 +2203,7 @@ class Database:
         *,
         assertion: DeviceAssertion | None,
         context: ApprovalContext | None,
+        out_of_band_code: str | None = None,
         now: datetime | None = None,
     ) -> dict[str, Any]:
         with self._connect() as connection:
@@ -2104,6 +2239,7 @@ class Database:
                     method="USER_CONFIRMATION",
                     now=approved_at,
                     approval=approval,
+                    out_of_band_code=out_of_band_code,
                 )
                 connection.commit()
                 return response
@@ -2127,6 +2263,7 @@ class Database:
         method: str,
         now: datetime,
         approval: Mapping[str, Any] | None = None,
+        out_of_band_code: str | None = None,
     ) -> dict[str, Any]:
         row = dict(receipt)
         if row["user_id"] != user_id:
@@ -2219,6 +2356,15 @@ class Database:
         )
         if validation.verdict == "FROZEN":
             raise ReceiptRejected("VALIDATION_FROZEN", persist_status=True)
+        self._enforce_policy(
+            connection,
+            user_id=user_id,
+            receipt_id=row["receipt_id"],
+            receipt_digest=row["receipt_digest"],
+            item_amounts=(row["amount_minor"],),
+            out_of_band_code=out_of_band_code,
+            now=now,
+        )
 
         source = connection.execute(
             """

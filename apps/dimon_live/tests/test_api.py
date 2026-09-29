@@ -165,8 +165,8 @@ class DimonLiveApiTests(unittest.TestCase):
         pending = response.json()
         self.assertEqual(pending["outcome"], "CLARIFICATION_REQUEST")
         self.assertEqual(
-            [step["stage"] for step in pending["trace"]][-2:],
-            ["SIGNED_APPROVAL_REQUIRED", "VALIDATION_PASSED"],
+            [step["stage"] for step in pending["trace"]][-3:],
+            ["SIGNED_APPROVAL_REQUIRED", "VALIDATION_PASSED", "RISK_POLICY_PASSED"],
         )
         self.assertEqual(pending["state"]["accounts"][0]["balance_minor"], 100000)
         choice = pending["receipt_choices"][0]
@@ -585,7 +585,7 @@ class DimonLiveApiTests(unittest.TestCase):
         self.assertIn("requestReceiptApproval,", script)
         self.assertIn("deviceApprover.signChallenge(issued.challenge)", script)
         self.assertIn("/api/receipts/${choice.receipt_id}/approve", client)
-        self.assertIn("receipt_digest: choice.receipt_digest, assertion", client)
+        self.assertIn("receipt_digest: choice.receipt_digest, ...signed", client)
         device = self.request("GET", "/static/device_approval.mjs")
         self.assertEqual(device.status_code, 200)
         self.assertIn('userVerification: "required"', device.text)

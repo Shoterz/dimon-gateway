@@ -74,6 +74,7 @@ class ReceiptApprovalRequest(BaseModel):
 
     receipt_digest: ReceiptDigest
     assertion: DeviceAssertionPayload
+    out_of_band_code: Annotated[str, Field(pattern=r"^\d{6}$")] | None = None
 
 
 class ReceiptChallengeRequest(BaseModel):
@@ -265,6 +266,36 @@ def create_app(
             "state": context.database.get_state(),
         }
 
+    @application.get("/api/profile")
+    async def customer_profile(request: Request, response: Response):
+        context = resolve(request, response)
+        return context.database.customer_profile()
+
+    @application.get("/api/mock-token")
+    async def mock_hardware_token(request: Request, response: Response):
+        # Simulates the separate hardware token the brief allows to be mocked.
+        # A real deployment delivers this code on another device or channel.
+        context = resolve(request, response)
+        return {
+            "simulated_device": "Mock hardware token (stands in for a separate device)",
+            "pending": context.database.mock_token_display(),
+        }
+
+    @application.get("/mock-token", include_in_schema=False)
+    async def mock_hardware_token_page(request: Request):
+        if manager.legacy_database is None:
+            try:
+                manager._assert_origin(
+                    request.headers.get("origin"),
+                    request.headers.get("host", "").lower(),
+                )
+            except SessionBoundaryError as exc:
+                raise HTTPException(status_code=exc.status_code, detail=exc.reason_code) from exc
+        return HTMLResponse(
+            (STATIC_DIR / "mock_token.html").read_text(encoding="utf-8"),
+            headers={"Cache-Control": "no-store"},
+        )
+
     @application.get("/api/signing/credentials")
     async def list_signing_credentials(request: Request, response: Response):
         context = resolve(request, response)
@@ -364,6 +395,7 @@ def create_app(
             approval.receipt_digest,
             assertion=assertion,
             context=approval_context(request),
+            out_of_band_code=approval.out_of_band_code,
         )
         return await attach_speech(result, context)
 
@@ -384,6 +416,7 @@ def create_app(
             approval.receipt_digest,
             assertion=assertion,
             context=approval_context(request),
+            out_of_band_code=approval.out_of_band_code,
         )
         return await attach_speech(result, context)
 

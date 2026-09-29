@@ -276,6 +276,10 @@ button:focus-visible, textarea:focus-visible, a:focus-visible { outline: 2px sol
 .approval-validation.pass { border-left-color: var(--settled); }
 .approval-validation.attention { border-left-color: var(--amber); background: rgba(241, 202, 116, .06); }
 .approval-validation ul { margin: 4px 0 0; padding-left: 18px; }
+.approval-oob { display: grid; gap: 6px; margin: 0 0 12px; padding: 10px; border: 1px solid rgba(241, 202, 116, .5); font-size: 12px; }
+.approval-oob input { min-height: 44px; padding: 6px 10px; border: 1px solid var(--line); background: var(--ink); color: var(--paper); font: 20px "Cascadia Mono", Consolas, monospace; letter-spacing: .2em; }
+.approval-oob a { color: var(--amber); }
+.approval-confirm:disabled { cursor: not-allowed; opacity: .45; }
 .approval-actions { display: flex; gap: 10px; justify-content: flex-end; }
 .approval-cancel, .approval-confirm { min-height: 44px; padding: 8px 16px; border: 1px solid var(--line); background: transparent; color: var(--paper); font-weight: 700; }
 .approval-confirm {

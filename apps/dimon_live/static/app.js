@@ -47,6 +47,8 @@ const ui = {
   approvalConfirm: document.querySelector("#approval-confirm"),
   approvalCancel: document.querySelector("#approval-cancel"),
   approvalValidation: document.querySelector("#approval-validation"),
+  approvalOob: document.querySelector("#approval-oob"),
+  approvalOobCode: document.querySelector("#approval-oob-code"),
 };
 
 let previousBalances = new Map();
@@ -128,6 +130,17 @@ const stageCopy = {
   VALIDATION_PASSED: ["Validator agreed", "Every field matches your words"],
   VALIDATION_ATTENTION: ["Validator flagged", "Some fields need your check"],
   VALIDATION_FROZEN: ["Validator froze draft", "Contradicts your words"],
+  RISK_POLICY_PASSED: ["Risk policy passed", "KYC, limits and velocity"],
+  OUT_OF_BAND_REQUIRED: ["High-value transfer", "Hardware token code required"],
+  KYC_PENDING: ["KYC incomplete", "No ledger mutation"],
+  KYC_EXPIRED: ["KYC expired", "No ledger mutation"],
+  KYC_REJECTED: ["KYC rejected", "No ledger mutation"],
+  AMOUNT_LIMIT_EXCEEDED: ["Over per-transfer limit", "No ledger mutation"],
+  DAILY_LIMIT_EXCEEDED: ["Over daily limit", "No ledger mutation"],
+  VELOCITY_LIMIT_EXCEEDED: ["Too many transfers", "Rate limited · no mutation"],
+  MICRO_TRANSFER_RATE_LIMITED: ["Small transfers throttled", "Rate limited · no mutation"],
+  OUT_OF_BAND_CODE_INVALID: ["Token code rejected", "Sign again with the right code"],
+  OUT_OF_BAND_LOCKED: ["Token locked", "Too many wrong codes"],
   DEVICE_SIGNATURE_VERIFIED: ["Device signature verified", "Bound to this receipt digest"],
   SIGNING_CREDENTIAL_REQUIRED: ["Device not enrolled", "No ledger mutation"],
   APPROVAL_SIGNATURE_INVALID: ["Signature rejected", "Does not verify"],
@@ -347,11 +360,23 @@ function confirmOnDevice(challenge, signerKind) {
     : "<strong>Independent validator: every field matches your words.</strong>";
   ui.approvalConfirm.textContent = signer.action;
   ui.approvalConfirm.style.setProperty("--hold", "0");
+  const needsCode = Boolean(review.requires_out_of_band);
+  ui.approvalOob.hidden = !needsCode;
+  ui.approvalOobCode.value = "";
+  const codeReady = () => !needsCode || /^\d{6}$/.test(ui.approvalOobCode.value);
+  const syncConfirm = () => { ui.approvalConfirm.disabled = !codeReady(); };
+  ui.approvalOobCode.oninput = syncConfirm;
+  syncConfirm();
   return new Promise(resolve => {
     let holdTimer = null;
     let holdStarted = 0;
     let frame = null;
-    const cleanup = result => {
+    const cleanup = confirmed => {
+      const result = confirmed
+        ? {confirmed: true, outOfBandCode: needsCode ? ui.approvalOobCode.value : undefined}
+        : {confirmed: false};
+      ui.approvalOobCode.oninput = null;
+      ui.approvalConfirm.disabled = false;
       clearTimeout(holdTimer);
       cancelAnimationFrame(frame);
       ui.approvalConfirm.onclick = null;
@@ -366,7 +391,7 @@ function confirmOnDevice(challenge, signerKind) {
       resolve(result);
     };
     const startHold = () => {
-      if (holdTimer) return;
+      if (holdTimer || !codeReady()) return;
       holdStarted = performance.now();
       const paint = () => {
         const progress = Math.min(1, (performance.now() - holdStarted) / 1200);
@@ -394,7 +419,7 @@ function confirmOnDevice(challenge, signerKind) {
       };
       ui.approvalConfirm.onkeyup = stopHold;
     } else {
-      ui.approvalConfirm.onclick = () => cleanup(true);
+      ui.approvalConfirm.onclick = () => { if (codeReady()) cleanup(true); };
     }
     ui.approvalCancel.onclick = () => cleanup(false);
     ui.approvalDialog.oncancel = event => {
@@ -402,7 +427,7 @@ function confirmOnDevice(challenge, signerKind) {
       cleanup(false);
     };
     ui.approvalDialog.showModal();
-    ui.approvalCancel.focus();
+    (needsCode ? ui.approvalOobCode : ui.approvalCancel).focus();
   });
 }
 
@@ -417,8 +442,8 @@ async function signedApproval(collection, receipt, submit, interruptedDetail) {
   const started = performance.now();
   setChoiceBusy(true);
   try {
-    let assertion = signedAssertions.get(receipt.receipt_id);
-    if (!assertion) {
+    let signed = signedAssertions.get(receipt.receipt_id);
+    if (!signed) {
       ui.elapsedLabel.textContent = "Requesting a one-time signing challenge";
       await ensureSigningCredential();
       const issued = await deviceApprover.requestChallenge(collection, receipt);
@@ -427,18 +452,21 @@ async function signedApproval(collection, receipt, submit, interruptedDetail) {
         return;
       }
       const credential = await deviceApprover.usableCredential(issued.challenge.allow_credentials);
-      const confirmed = await confirmOnDevice(issued.challenge, credential?.kind);
-      if (!confirmed) {
+      const decision = await confirmOnDevice(issued.challenge, credential?.kind);
+      if (!decision.confirmed) {
         renderApprovalRefusal("APPROVAL_CANCELLED", "You closed the confirmation. Nothing was signed and balances are unchanged.");
         ui.elapsedLabel.textContent = "Approval cancelled";
         return;
       }
       ui.elapsedLabel.textContent = "Waiting for the device signature";
-      assertion = wireAssertion(await deviceApprover.signChallenge(issued.challenge));
-      signedAssertions.set(receipt.receipt_id, assertion);
+      signed = {
+        assertion: wireAssertion(await deviceApprover.signChallenge(issued.challenge)),
+        out_of_band_code: decision.outOfBandCode,
+      };
+      signedAssertions.set(receipt.receipt_id, signed);
     }
     ui.elapsedLabel.textContent = "Signed approval in flight";
-    const approval = await submit(receipt, assertion);
+    const approval = await submit(receipt, signed);
     if (approval.kind === "UNKNOWN") {
       ui.outcomePanel.className = "outcome-panel clarification";
       ui.outcomeIndex.textContent = "?";

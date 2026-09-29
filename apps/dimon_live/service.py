@@ -162,7 +162,7 @@ class ActionService:
             ],
         }
         if verdicts != {"FROZEN"}:
-            return response
+            return self._with_policy_preview(response)
         return {
             **response,
             "outcome": "BLOCKED",
@@ -176,6 +176,35 @@ class ActionService:
             "receipt_choices": [],
             "batch_receipt": None,
         }
+
+    def _with_policy_preview(self, response: dict[str, Any]) -> dict[str, Any]:
+        """Show KYC, limit, and velocity outcomes before the user signs.
+
+        This is advisory; the gateway re-evaluates the same policy inside the
+        executing transaction.
+        """
+
+        choices = response.get("receipt_choices") or []
+        batch = response.get("batch_receipt")
+        if batch:
+            amounts = tuple(item["amount_minor"] for item in batch.get("items", ()))
+        elif choices:
+            amounts = (choices[0]["amount_minor"],)
+        else:
+            return response
+        preview = self.database.policy_preview(amounts)
+        trace = [*(response.get("trace") or ())]
+        if not preview["allowed"]:
+            return {
+                **response,
+                "outcome": "BLOCKED",
+                "reason_code": preview["reason_code"],
+                "trace": trace + [{"stage": preview["reason_code"]}],
+                "receipt_choices": [],
+                "batch_receipt": None,
+            }
+        stage = "OUT_OF_BAND_REQUIRED" if preview["requires_out_of_band"] else "RISK_POLICY_PASSED"
+        return {**response, "policy": preview, "trace": trace + [{"stage": stage}]}
 
     def _process(self, request_id: str, text: str) -> dict[str, Any]:
         existing = self.database.get_attempt(request_id)
@@ -1006,6 +1035,7 @@ class ActionService:
         *,
         assertion: DeviceAssertion | None,
         context: ApprovalContext | None,
+        out_of_band_code: str | None = None,
         user_id: str = DEMO_USER_ID,
     ) -> dict[str, Any]:
         trace = [{"stage": "RECEIPT_APPROVAL_RECEIVED"}]
@@ -1016,6 +1046,7 @@ class ActionService:
                 user_id,
                 assertion=assertion,
                 context=context,
+                out_of_band_code=out_of_band_code,
             )
         except ReceiptRejected as exc:
             return {
@@ -1058,6 +1089,7 @@ class ActionService:
         *,
         assertion: DeviceAssertion | None,
         context: ApprovalContext | None,
+        out_of_band_code: str | None = None,
         user_id: str = DEMO_USER_ID,
     ) -> dict[str, Any]:
         trace = [{"stage": "BATCH_RECEIPT_APPROVAL_RECEIVED"}]
@@ -1068,6 +1100,7 @@ class ActionService:
                 user_id,
                 assertion=assertion,
                 context=context,
+                out_of_band_code=out_of_band_code,
             )
         except ReceiptRejected as exc:
             return {

@@ -185,6 +185,11 @@ SELECT balance_minor FROM accounts;</code></pre>
         <div><dt>Signer</dt><dd id="approval-method">—</dd></div>
       </dl>
       <div id="approval-validation" class="approval-validation" role="status"></div>
+      <div id="approval-oob" class="approval-oob" hidden>
+        <label for="approval-oob-code">High-value transfer · enter the 6-digit code from your hardware token</label>
+        <input id="approval-oob-code" inputmode="numeric" autocomplete="one-time-code" pattern="\d{6}" maxlength="6" placeholder="000000">
+        <a href="/mock-token" target="dimon-mock-token" rel="noopener">Open the mock hardware token</a>
+      </div>
       <p id="approval-note" class="approval-note">Your device signs a one-time challenge bound to this receipt's digest. The AI cannot sign, and a changed amount or recipient invalidates the signature.</p>
       <div class="approval-actions">
         <button id="approval-cancel" type="button" class="approval-cancel">Cancel</button>

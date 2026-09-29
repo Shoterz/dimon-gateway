@@ -1,11 +1,12 @@
-// Retrying an interrupted approval resends the identical signed assertion;
-// the gateway returns the stored outcome instead of moving money again.
-export async function requestBatchReceiptApproval(receipt, assertion, fetchImpl = globalThis.fetch) {
+// `signed` is {assertion, out_of_band_code?}. Retrying an interrupted approval
+// resends the identical signed approval; the gateway returns the stored
+// outcome instead of moving money again.
+export async function requestBatchReceiptApproval(receipt, signed, fetchImpl = globalThis.fetch) {
   const url = `/api/batch-receipts/${receipt.receipt_id}/approve`;
   const options = {
     method: "POST",
     headers: {"Content-Type": "application/json"},
-    body: JSON.stringify({receipt_digest: receipt.receipt_digest, assertion}),
+    body: JSON.stringify({receipt_digest: receipt.receipt_digest, ...signed}),
   };
 
   try {

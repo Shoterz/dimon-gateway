@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Mock Hardware Token</title>
+    <style>
+      :root { --ink: #0a0e10; --panel: #172126; --line: #2b3a40; --paper: #e8efec; --muted: #93a39e; --amber: #f1ca74; color-scheme: dark; font-family: Inter, "Segoe UI", Helvetica, Arial, sans-serif; }
+      body { margin: 0; min-height: 100vh; background: var(--ink); color: var(--paper); display: grid; place-items: start center; }
+      main { width: min(380px, calc(100vw - 32px)); padding: 28px 0; }
+      .banner { margin: 0 0 16px; padding: 8px 10px; border: 1px dashed var(--amber); color: var(--amber); font-size: 12px; line-height: 1.5; }
+      h1 { margin: 0 0 12px; font-size: 20px; }
+      .code-card { margin: 0 0 10px; padding: 14px; border: 1px solid var(--line); background: var(--panel); }
+      .code-card small { color: var(--muted); font-size: 12px; }
+      .code { margin: 6px 0; font-family: "Cascadia Mono", Consolas, monospace; font-size: 34px; letter-spacing: .18em; }
+      .empty { color: var(--muted); font-size: 14px; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <p class="banner">Simulated device. In production this code appears only on a separate hardware token or channel; it is shown in a second window here because the brief allows mock services.</p>
+      <h1>Transaction-signing token</h1>
+      <div id="codes" aria-live="polite"><p class="empty">Waiting for a high-value approval…</p></div>
+    </main>
+    <script type="module">
+      const codes = document.querySelector("#codes");
+      const formatSgd = minor => `S$${(minor / 100).toLocaleString("en-SG", {minimumFractionDigits: 2, maximumFractionDigits: 2})}`;
+      const escapeHtml = value => String(value).replace(/[&<>"']/g, character => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"})[character]);
+      async function refresh() {
+        try {
+          const response = await fetch("/api/mock-token", {cache: "no-store"});
+          const body = await response.json();
+          codes.innerHTML = body.pending?.length
+            ? body.pending.map(item => `<article class="code-card">
+                <small>Confirms ${escapeHtml(formatSgd(item.total_minor))} to ${escapeHtml(item.payee)}</small>
+                <p class="code">${escapeHtml(item.code)}</p>
+                <small>Valid for this exact receipt only</small>
+              </article>`).join("")
+            : '<p class="empty">No high-value approval is waiting.</p>';
+        } catch (_error) {
+          codes.innerHTML = '<p class="empty">Token offline.</p>';
+        }
+      }
+      refresh();
+      setInterval(refresh, 2000);
+    </script>
+  </body>
+</html>

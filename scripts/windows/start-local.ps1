@@ -69,9 +69,12 @@ foreach ($service in $services) {
 }
 
 $port = if ($env:DIMON_PORT) { $env:DIMON_PORT } else { "8890" }
-# localhost, not 127.0.0.1: WebAuthn (Windows Hello) rejects IP-address origins.
+# Open localhost, not 127.0.0.1: WebAuthn (Windows Hello) rejects IP-address
+# origins. Probe the IPv4 loopback the server binds, since localhost resolves
+# to ::1 first and can outlast the short health-check timeout.
 $appUrl = "http://localhost:$port"
-if (Test-Healthy "$appUrl/static/app.css") {
+$probeUrl = "http://127.0.0.1:$port"
+if (Test-Healthy "$probeUrl/static/app.css") {
     Write-Host "app: already running"
 } else {
     Write-Host "app: starting on $appUrl"
@@ -79,7 +82,7 @@ if (Test-Healthy "$appUrl/static/app.css") {
 }
 
 $deadline = (Get-Date).AddSeconds(60)
-while (-not (Test-Healthy "$appUrl/static/app.css")) {
+while (-not (Test-Healthy "$probeUrl/static/app.css")) {
     if ((Get-Date) -gt $deadline) {
         throw "the application did not start; check the 'dimon: app' window"
     }

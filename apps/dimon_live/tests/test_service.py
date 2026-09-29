@@ -331,7 +331,10 @@ class ActionServiceTests(unittest.TestCase):
         # A fully specified command is still only a draft.
         self.assertEqual(pending["outcome"], "CLARIFICATION_REQUEST")
         stages = [step["stage"] for step in pending["trace"]]
-        self.assertEqual(stages[-2:], ["SIGNED_APPROVAL_REQUIRED", "VALIDATION_PASSED"])
+        self.assertEqual(
+            stages[-3:],
+            ["SIGNED_APPROVAL_REQUIRED", "VALIDATION_PASSED", "RISK_POLICY_PASSED"],
+        )
         self.assertEqual(pending["receipt_choices"][0]["validation"]["verdict"], "PASS")
         self.assertEqual(self.database.get_state()["transactions"], [])
 

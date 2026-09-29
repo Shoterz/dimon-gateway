@@ -334,9 +334,9 @@ class ReceiptApprovalClientTests(unittest.TestCase):
               json: async () => ({{transaction_id: "txn_fixed", idempotent_replay: true}}),
             }};
           }};
-          const assertion = {{challenge_id: "chal_fixed", signature: "sig"}};
-          const first = await requestReceiptApproval(choice, assertion, fakeFetch);
-          const second = await requestReceiptApproval(choice, assertion, fakeFetch);
+          const signed = {{assertion: {{challenge_id: "chal_fixed", signature: "sig"}}}};
+          const first = await requestReceiptApproval(choice, signed, fakeFetch);
+          const second = await requestReceiptApproval(choice, signed, fakeFetch);
           process.stdout.write(JSON.stringify({{first, second, calls}}));
         """
 
@@ -389,9 +389,9 @@ class ReceiptApprovalClientTests(unittest.TestCase):
             if (attempt === 1) throw new TypeError("response interrupted");
             return {{ok: true, json: async () => ({{batch_transaction_id: "batch_txn_fixed"}})}};
           }};
-          const assertion = {{challenge_id: "chal_fixed", signature: "sig"}};
-          const first = await requestBatchReceiptApproval(receipt, assertion, fakeFetch);
-          const second = await requestBatchReceiptApproval(receipt, assertion, fakeFetch);
+          const signed = {{assertion: {{challenge_id: "chal_fixed", signature: "sig"}}}};
+          const first = await requestBatchReceiptApproval(receipt, signed, fakeFetch);
+          const second = await requestBatchReceiptApproval(receipt, signed, fakeFetch);
           process.stdout.write(JSON.stringify({{first, second, calls}}));
         """
 
