@@ -172,10 +172,11 @@ if ($Wait) {
     Write-Host "  (Logs: runtime\logs. Closing this window leaves Dimon running; use stop.cmd.)"
     $watched = @($services | ForEach-Object { @{ Name = $_.Name; Label = $_.Label; Process = $_.Process } }) + @(@{ Name = "app"; Label = "Web app"; Process = $app })
     while ($true) {
-        if ([Console]::KeyAvailable) {
-            $key = [Console]::ReadKey($true)
-            if ($key.Key -eq "Q") { break }
-        }
+        $pressed = $null
+        try {
+            if ([Console]::KeyAvailable) { $pressed = [Console]::ReadKey($true).Key }
+        } catch {}   # no interactive console (input redirected): keep watching only
+        if ($pressed -eq "Q") { break }
         foreach ($entry in $watched) {
             if ($entry.Process.HasExited -and -not $entry.Reported) {
                 Write-Caution "$($entry.Label) stopped unexpectedly."

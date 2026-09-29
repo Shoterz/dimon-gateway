@@ -6,6 +6,37 @@ grounding, policy, receipts, approvals, session isolation, and SQLite ledger
 mutation. Models never receive SQL, shell, Python execution, or approval
 authority.
 
+## Quick start on Windows
+
+No Python, admin rights, or command line needed.
+
+1. Get the code: `git clone`, or **Code → Download ZIP** on GitHub and extract it.
+2. Double-click **`install.cmd`**. Choose:
+   - **Demo mode**: ready in about a minute on any Windows 10/11 PC. AI
+     responses are scripted; everything else (receipts, signing, validator,
+     limits, audit trail) is real.
+   - **Local AI**: real Qwen, speech recognition, and speech output on your PC.
+     About a 9 GB one-time download; 16 GB RAM recommended. Uses NVIDIA, AMD,
+     or Intel graphics through Vulkan, or the CPU if there is no GPU driver.
+3. Double-click the **Dimon Gateway** shortcut (or `start.cmd`). Your browser
+   opens <http://localhost:8890>. Press **Q** in the Dimon window to stop, or
+   run `stop.cmd`.
+
+`install.cmd` is safe to run again at any time to repair an install or switch
+modes; finished downloads are kept and every file is SHA-256 verified.
+
+| If you see | Do this |
+| --- | --- |
+| "Windows protected your PC" when opening a `.cmd` | Click **More info → Run anyway** (files from a ZIP are marked as downloaded). |
+| A Windows permission prompt during Local AI setup | Allow it: it installs Microsoft's Visual C++ runtime, which the model runtimes need. |
+| "Port … is used by …" | Nothing to do: Dimon picks a free port and opens the right address. |
+| A service "stopped while starting" | Its log is shown; logs live in `runtime\logs`. Running `install.cmd` again repairs most installs. |
+| No fingerprint/face prompt when signing | Windows Hello needs a PIN or biometric set up in Windows Settings; otherwise Dimon uses its labelled mock biometric (press and hold). |
+| Microphone does nothing | Allow microphone access for the browser, and in Windows Settings → Privacy → Microphone. |
+
+Models and runtimes live in `%LOCALAPPDATA%\DimonGateway` (set `DIMON_HOME` to
+move them). Settings are in `apps\dimon_live\.env`.
+
 ## Development setup
 
 The repository targets **Python 3.12** and uses `uv` for dependency locking.
@@ -58,18 +89,18 @@ approvals, and each developer's SQLite ledger remain local in every mode.
 
 ### Local mode on Windows (any GPU vendor)
 
-Windows hosts run `local` mode natively: Qwen on a Vulkan `llama-server`,
-speech recognition on whisper.cpp (`DIMON_STT_BACKEND=whisper_cpp`), and
-Kokoro on CPU PyTorch.
-
-```powershell
-.\scripts\windows\setup-local-host.ps1   # downloads runtimes, prints .env values
-# fill in the model paths it prints in apps\dimon_live\.env, then:
-.\scripts\windows\start-local.ps1        # starts every service and the app
-```
+Windows hosts run `local` mode natively: Qwen on a Vulkan (or CPU)
+`llama-server`, speech recognition on whisper.cpp
+(`DIMON_STT_BACKEND=whisper_cpp`), and Kokoro on CPU PyTorch. `install.cmd`
+sets all of this up; pinned download URLs and hashes are in
+`scripts/windows/artifacts.psd1`. The scripts target the Windows PowerShell 5.1
+that ships with Windows.
 
 The Windows launchers read `apps\dimon_live\.env`; explicit shell variables
-still win. Use `dimon-serve`, not `dimon-dev`, for local mode: `dimon-dev`
+still win. Service ports come from the URLs in `.env` (`DIMON_QWEN_API_BASE`,
+`DIMON_WHISPER_CPP_URL`, `DIMON_KOKORO_URL`, `DIMON_PORT`). For manual runs,
+each service has `services\<name>\run.ps1` (`-Check` validates without
+starting). Use `dimon-serve`, not `dimon-dev`, for local mode: `dimon-dev`
 forces fixture inference unless the shell sets `DIMON_INFERENCE_MODE`.
 
 ## Security model

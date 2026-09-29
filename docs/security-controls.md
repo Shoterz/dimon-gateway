@@ -56,8 +56,9 @@ with `SIGNED_APPROVAL_REQUIRED` when no signature is supplied.
 
 ## Live walkthrough
 
-Start everything with `scripts\windows\start-local.ps1` (it opens
-`http://localhost:8890`, where Windows Hello works).
+Install once with `install.cmd` (choose Local AI for the real models), then
+start everything with `start.cmd`. It opens `http://localhost:8890`, where
+Windows Hello works.
 
 1. **Signed approval.** `Send John Smith S$50 from savings.` → the trace ends
    *Draft only → Validator agreed → Risk policy passed*; nothing has moved.
