@@ -251,3 +251,35 @@ button:focus-visible, textarea:focus-visible, a:focus-visible { outline: 2px sol
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
 }
+
+.approval-dialog {
+  width: min(460px, calc(100vw - 32px));
+  padding: 22px;
+  border: 1px solid rgba(120, 224, 207, .5);
+  background: var(--mineral);
+  color: var(--paper);
+}
+.approval-dialog::backdrop { background: rgba(10, 14, 16, .78); backdrop-filter: blur(3px); }
+.approval-kicker { margin: 0 0 4px; color: var(--signal); font-size: 11px; letter-spacing: .06em; text-transform: uppercase; }
+.approval-dialog h2 { margin: 0 0 14px; font-size: 22px; }
+.approval-items { display: grid; gap: 8px; margin-bottom: 12px; }
+.approval-item { display: grid; grid-template-columns: 1fr auto; gap: 12px; padding: 10px; border: 1px solid var(--line); background: var(--panel); }
+.approval-item span { display: grid; gap: 2px; }
+.approval-item small, .approval-facts dt { color: var(--muted); font-size: 11px; }
+.approval-item em { color: var(--muted); font-size: 12px; font-style: normal; }
+.approval-facts { display: grid; gap: 6px; margin: 0 0 12px; }
+.approval-facts div { display: flex; justify-content: space-between; gap: 12px; }
+.approval-facts dd { margin: 0; font-weight: 700; text-align: right; }
+.approval-digest { font-family: "Cascadia Mono", Consolas, monospace; font-weight: 400; }
+.approval-note { margin: 0 0 16px; color: var(--muted); font-size: 12px; line-height: 1.5; }
+.approval-actions { display: flex; gap: 10px; justify-content: flex-end; }
+.approval-cancel, .approval-confirm { min-height: 44px; padding: 8px 16px; border: 1px solid var(--line); background: transparent; color: var(--paper); font-weight: 700; }
+.approval-confirm {
+  --hold: 0;
+  border-color: var(--signal);
+  color: var(--ink);
+  background: linear-gradient(90deg, var(--settled) calc(var(--hold) * 100%), var(--signal) calc(var(--hold) * 100%));
+  user-select: none;
+}
+.approval-cancel:focus-visible, .approval-confirm:focus-visible { outline: 2px solid var(--amber); outline-offset: 2px; }
+@media (prefers-reduced-motion: reduce) { .approval-confirm { transition: none; } }

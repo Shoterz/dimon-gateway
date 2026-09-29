@@ -6,6 +6,7 @@ import re
 import sqlite3
 from typing import Any
 
+from .approval_gateway import ApprovalContext, DeviceAssertion
 from .batch_grounding import bind_batch_evidence
 from .batch_receipts import BatchReceiptDraft, BatchReceiptItemDraft
 from .database import (
@@ -15,7 +16,6 @@ from .database import (
     IdempotencyConflict,
     InsufficientFunds,
     ReceiptRejected,
-    TransferCommand,
 )
 from .grounding import (
     derive_amount_from_text,
@@ -591,88 +591,26 @@ class ActionService:
                 "beneficiary_id": beneficiary["beneficiary_id"],
             }
         )
-        if not _has_affirmative_target_slot(
+        # Zero-trust boundary: the agent only drafts. Even a fully specified
+        # command becomes an immutable receipt that executes solely on a
+        # device signature from the user; there is no auto-execution path.
+        fully_specified = _has_affirmative_target_slot(
             text,
             beneficiary["display_name"],
             intent["amount_evidence"],
             source["label"],
-        ):
-            amount = _decimal_amount(intent["amount_minor"])
-            return self._receipt_confirmation(
-                request_id,
-                text,
-                "ACTION_CONFIRMATION_REQUIRED",
-                trace,
-                extracted,
-                source,
-                (beneficiary,),
-                (
-                    f"Send S${amount} to {beneficiary['display_name']} "
-                    f"from {source['label']}?"
-                ),
-            )
-
-        resolved_action = {
-            "kind": "BENEFICIARY_TRANSFER",
-            "source_account_id": source["account_id"],
-            "beneficiary_id": beneficiary["beneficiary_id"],
-            "destination_account_id": beneficiary["destination_account_id"],
-            "recipient_display_name": beneficiary["display_name"],
-            "masked_destination": beneficiary["masked_destination"],
-            "amount_minor": intent["amount_minor"],
-            "currency": intent["currency"],
-        }
-        trace.append({"stage": "ELIGIBILITY_PASSED"})
-        try:
-            execution = self.database.execute_policy_transfer(
-                TransferCommand(
-                    request_id=request_id,
-                    original_text=text,
-                    source_account_id=source["account_id"],
-                    beneficiary_id=beneficiary["beneficiary_id"],
-                    amount_minor=intent["amount_minor"],
-                    currency=intent["currency"],
-                    raw_model_output=extracted.raw_output,
-                    validated_intent=intent,
-                    evidence_bundle=_evidence_bundle(text, intent),
-                )
-            )
-        except InsufficientFunds:
-            return self._nonexecuting(
-                request_id,
-                text,
-                "BLOCKED",
-                "INSUFFICIENT_FUNDS",
-                trace,
-                extracted=extracted,
-            )
-        except IdempotencyConflict:
-            return {
-                "outcome": "BLOCKED",
-                "request_id": request_id,
-                "reason_code": "IDEMPOTENCY_CONFLICT",
-                "trace": trace + [{"stage": "IDEMPOTENCY_CONFLICT"}],
-                "state": self.database.get_state(),
-            }
-        except sqlite3.Error as exc:
-            return self._nonexecuting(
-                request_id,
-                text,
-                "FAILED",
-                "DATABASE_ERROR",
-                trace,
-                extracted=extracted,
-                detail=str(exc),
-            )
-
-        trace.append({"stage": "SQLITE_COMMITTED"})
-        return {
-            **execution,
-            "validated_intent": intent,
-            "resolved_action": resolved_action,
-            "trace": trace,
-            "state": self.database.get_state(),
-        }
+        )
+        amount = _decimal_amount(intent["amount_minor"])
+        return self._receipt_confirmation(
+            request_id,
+            text,
+            "SIGNED_APPROVAL_REQUIRED" if fully_specified else "ACTION_CONFIRMATION_REQUIRED",
+            trace,
+            extracted,
+            source,
+            (beneficiary,),
+            f"Send S${amount} to {beneficiary['display_name']} from {source['label']}?",
+        )
 
     def _recover_exact_saved_batch(
         self,
@@ -1001,6 +939,8 @@ class ActionService:
         receipt_id: str,
         receipt_digest: str,
         *,
+        assertion: DeviceAssertion | None,
+        context: ApprovalContext | None,
         user_id: str = DEMO_USER_ID,
     ) -> dict[str, Any]:
         trace = [{"stage": "RECEIPT_APPROVAL_RECEIVED"}]
@@ -1009,6 +949,8 @@ class ActionService:
                 receipt_id,
                 receipt_digest,
                 user_id,
+                assertion=assertion,
+                context=context,
             )
         except ReceiptRejected as exc:
             return {
@@ -1037,6 +979,7 @@ class ActionService:
             **execution,
             "trace": trace
             + [
+                {"stage": "DEVICE_SIGNATURE_VERIFIED"},
                 {"stage": "RECEIPT_REVALIDATED"},
                 {"stage": "SQLITE_COMMITTED"},
             ],
@@ -1048,12 +991,18 @@ class ActionService:
         receipt_id: str,
         receipt_digest: str,
         *,
+        assertion: DeviceAssertion | None,
+        context: ApprovalContext | None,
         user_id: str = DEMO_USER_ID,
     ) -> dict[str, Any]:
         trace = [{"stage": "BATCH_RECEIPT_APPROVAL_RECEIVED"}]
         try:
             execution = self.database.approve_batch_receipt(
-                receipt_id, receipt_digest, user_id
+                receipt_id,
+                receipt_digest,
+                user_id,
+                assertion=assertion,
+                context=context,
             )
         except ReceiptRejected as exc:
             return {
@@ -1080,6 +1029,7 @@ class ActionService:
         return {
             **execution,
             "trace": trace + [
+                {"stage": "DEVICE_SIGNATURE_VERIFIED"},
                 {"stage": "BATCH_RECEIPT_REVALIDATED"},
                 {"stage": "SQLITE_BATCH_COMMITTED"},
             ],

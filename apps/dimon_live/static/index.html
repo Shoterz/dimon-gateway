@@ -174,6 +174,23 @@ SELECT balance_minor FROM accounts;</code></pre>
       </section>
     </main>
 
+    <dialog id="approval-dialog" class="approval-dialog" aria-labelledby="approval-title" aria-describedby="approval-note">
+      <p class="approval-kicker">Deterministic confirmation · rendered from the stored receipt</p>
+      <h2 id="approval-title">Sign exactly this</h2>
+      <div id="approval-items" class="approval-items"></div>
+      <dl class="approval-facts">
+        <div><dt>From</dt><dd id="approval-source">—</dd></div>
+        <div><dt>Total debit</dt><dd id="approval-total">—</dd></div>
+        <div><dt>Receipt digest</dt><dd id="approval-digest" class="approval-digest">—</dd></div>
+        <div><dt>Signer</dt><dd id="approval-method">—</dd></div>
+      </dl>
+      <p id="approval-note" class="approval-note">Your device signs a one-time challenge bound to this receipt's digest. The AI cannot sign, and a changed amount or recipient invalidates the signature.</p>
+      <div class="approval-actions">
+        <button id="approval-cancel" type="button" class="approval-cancel">Cancel</button>
+        <button id="approval-confirm" type="button" class="approval-confirm">Approve</button>
+      </div>
+    </dialog>
+
     <footer>
       <span>Localhost only</span>
       <span>Qwen has no SQL or arbitrary tools</span>

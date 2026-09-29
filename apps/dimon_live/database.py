@@ -11,6 +11,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterator, Mapping, Sequence
 
+from .approval_gateway import ApprovalContext, ApprovalRejected, DeviceAssertion
 from .batch_receipts import (
     BatchReceiptDraft,
     BatchReceiptItemDraft,
@@ -21,6 +22,14 @@ from .name_resolution import (
     name_tokens,
     rank_name_candidates,
     rank_phonetic_candidates,
+)
+from .signing_store import (
+    SIGNING_SCHEMA,
+    consume_approval,
+    issue_challenge,
+    list_credentials,
+    prior_signature,
+    register_credential,
 )
 from .receipts import (
     DEMO_USER_ID,
@@ -366,6 +375,7 @@ class Database:
             connection.executescript(SCHEMA)
             connection.executescript(V2_SCHEMA)
             connection.executescript(BATCH_SCHEMA)
+            connection.executescript(SIGNING_SCHEMA)
             self._apply_v2_migrations(connection)
             count = connection.execute("SELECT COUNT(*) FROM accounts").fetchone()[0]
             if count == 0:
@@ -494,6 +504,10 @@ class Database:
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             try:
+                # Enrolled device credentials survive a demo reset; the
+                # challenges and signatures belong to the receipts removed here.
+                connection.execute("DELETE FROM approval_signatures")
+                connection.execute("DELETE FROM approval_challenges")
                 connection.execute("DELETE FROM batch_ledger_entries")
                 connection.execute("DELETE FROM batch_receipt_executions")
                 connection.execute("DELETE FROM batch_ledger_transactions")
@@ -909,6 +923,8 @@ class Database:
         receipt_digest: str,
         user_id: str = DEMO_USER_ID,
         *,
+        assertion: DeviceAssertion | None,
+        context: ApprovalContext | None,
         now: datetime | None = None,
     ) -> dict[str, Any]:
         with self._connect() as connection:
@@ -977,6 +993,17 @@ class Database:
                     """,
                     (row["request_id"], receipt_id),
                 ).fetchone()
+                approval = self._require_device_signature(
+                    connection,
+                    assertion,
+                    context,
+                    purpose="APPROVE_BATCH",
+                    receipt_id=receipt_id,
+                    receipt_digest=receipt_digest,
+                    user_id=user_id,
+                    executed=execution is not None,
+                    now=approved_at,
+                )
                 if execution is not None:
                     replay = json.loads(execution["response_json"])
                     replay["idempotent_replay"] = True
@@ -1126,6 +1153,8 @@ class Database:
                     "validated_intent": validated_intent,
                     "resolved_actions": resolved_actions,
                 }
+                if approval is not None:
+                    response["approval"] = dict(approval)
                 connection.execute(
                     """
                     UPDATE action_attempts
@@ -1797,134 +1826,204 @@ class Database:
             connection.commit()
         return dict(attempt.response)
 
-    def execute_policy_transfer(
+    def _require_device_signature(
         self,
-        command: TransferCommand,
+        connection: sqlite3.Connection,
+        assertion: DeviceAssertion | None,
+        context: ApprovalContext | None,
         *,
+        purpose: str,
+        receipt_id: str,
+        receipt_digest: str,
+        user_id: str,
+        executed: bool,
+        now: datetime,
+    ) -> dict[str, Any] | None:
+        """Gate every ledger movement on a device signature over this receipt.
+
+        Returns None only for an exact resubmission of an already-accepted
+        signature on an executed receipt, so an interrupted client can safely
+        retrieve the stored outcome without moving money again.
+        """
+
+        if assertion is None or context is None:
+            raise ReceiptRejected("SIGNED_APPROVAL_REQUIRED")
+        prior = prior_signature(connection, assertion)
+        if prior is not None:
+            if executed and prior["purpose"] == purpose and prior["receipt_id"] == receipt_id:
+                return None
+            raise ReceiptRejected("APPROVAL_CHALLENGE_REPLAYED")
+        if executed:
+            raise ReceiptRejected("RECEIPT_ALREADY_EXECUTED")
+        try:
+            return consume_approval(
+                connection,
+                assertion,
+                purpose=purpose,
+                receipt_id=receipt_id,
+                receipt_digest=receipt_digest,
+                user_id=user_id,
+                context=context,
+                now=now,
+            )
+        except ApprovalRejected as exc:
+            # Persist the spent challenge: a failed signature burns it.
+            raise ReceiptRejected(exc.reason_code, persist_status=True) from None
+
+    def issue_registration_challenge(
+        self, user_id: str = DEMO_USER_ID, *, now: datetime | None = None
+    ) -> dict[str, Any]:
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            challenge = issue_challenge(
+                connection, purpose="REGISTER", user_id=user_id, now=now or self._clock()
+            )
+            connection.commit()
+            return challenge
+
+    def register_signing_credential(
+        self,
+        *,
+        challenge_id: str,
+        credential_kind: str,
+        credential_id: str,
+        public_key_spki: bytes,
+        algorithm: int,
+        client_data_json: bytes,
+        authenticator_data: bytes,
+        signature: bytes | None,
+        context: ApprovalContext,
         user_id: str = DEMO_USER_ID,
         now: datetime | None = None,
     ) -> dict[str, Any]:
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             try:
-                authorized_at = now or self._clock()
-                existing = connection.execute(
-                    """
-                    SELECT original_text, response_json
-                    FROM action_attempts WHERE request_id = ?
-                    """,
-                    (command.request_id,),
-                ).fetchone()
-                if existing is not None:
-                    if existing["original_text"] != command.original_text:
-                        raise IdempotencyConflict("IDEMPOTENCY_CONFLICT")
-                    connection.rollback()
-                    return json.loads(existing["response_json"])
-
-                beneficiary = connection.execute(
-                    """
-                    SELECT b.display_name
-                    FROM beneficiaries b WHERE b.beneficiary_id = ?
-                    """,
-                    (command.beneficiary_id,),
-                ).fetchone()
-                if beneficiary is None:
-                    raise ResolutionError("server-owned account resolution failed")
-                record = build_receipt_record(
-                    ReceiptDraft(
-                        request_id=command.request_id,
-                        original_text=command.original_text,
-                        user_id=user_id,
-                        source_account_id=command.source_account_id,
-                        beneficiary_id=command.beneficiary_id,
-                        recipient_display_name=beneficiary["display_name"],
-                        amount_minor=command.amount_minor,
-                        currency=command.currency,
-                        evidence_bundle=command.evidence_bundle,
-                    ),
-                    now=authorized_at,
-                    receipt_id=f"receipt_{uuid.uuid4().hex}",
-                    nonce=f"nonce_{uuid.uuid4().hex}",
-                )
-                pending_response = {
-                    "outcome": "AWAITING_INTERNAL_POLICY",
-                    "request_id": command.request_id,
-                }
-                connection.execute(
-                    """
-                    INSERT INTO action_attempts (
-                      request_id, original_text, raw_model_output,
-                      validated_intent_json, outcome, reason_code,
-                      response_json, created_at
-                    ) VALUES (?, ?, ?, ?, ?, NULL, ?, ?)
-                    """,
-                    (
-                        command.request_id,
-                        command.original_text,
-                        command.raw_model_output,
-                        json.dumps(command.validated_intent, ensure_ascii=False),
-                        pending_response["outcome"],
-                        json.dumps(pending_response, ensure_ascii=False),
-                        record["created_at"],
-                    ),
-                )
-                connection.execute(
-                    """
-                    INSERT INTO review_receipts (
-                      receipt_id, clarification_group_id, request_id, user_id,
-                      source_account_id, beneficiary_id, recipient_display_name,
-                      amount_minor, currency, original_text, expires_at, nonce,
-                      canonical_json, receipt_digest, status, created_at,
-                      contract_version, destination_kind, destination_reference,
-                      destination_account_id, lookup_reference, evidence_bundle_json
-                    ) VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        record["receipt_id"],
-                        record["request_id"],
-                        record["user_id"],
-                        record["source_account_id"],
-                        record["beneficiary_id"],
-                        record["recipient_display_name"],
-                        record["amount_minor"],
-                        record["currency"],
-                        record["original_text"],
-                        record["expires_at"],
-                        record["nonce"],
-                        record["canonical_json"],
-                        record["receipt_digest"],
-                        record["status"],
-                        record["created_at"],
-                        record["contract_version"],
-                        record.get("destination_kind"),
-                        record.get("destination_reference"),
-                        record.get("destination_account_id"),
-                        record.get("lookup_reference"),
-                        record.get("evidence_bundle_json"),
-                    ),
-                )
-                receipt = connection.execute(
-                    "SELECT * FROM review_receipts WHERE receipt_id = ?",
-                    (record["receipt_id"],),
-                ).fetchone()
-                response = self._execute_stored_receipt(
+                result = register_credential(
                     connection,
-                    receipt,
-                    supplied_digest=record["receipt_digest"],
+                    challenge_id=challenge_id,
                     user_id=user_id,
-                    method="EXPLICIT_COMMAND_POLICY",
-                    now=authorized_at,
+                    credential_kind=credential_kind,
+                    credential_id=credential_id,
+                    public_key_spki=public_key_spki,
+                    algorithm=algorithm,
+                    client_data_json=client_data_json,
+                    authenticator_data=authenticator_data,
+                    signature=signature,
+                    context=context,
+                    now=now or self._clock(),
+                )
+            except ApprovalRejected:
+                connection.commit()  # the registration challenge stays spent
+                raise
+            connection.commit()
+            return result
+
+    def signing_credentials(self, rp_id: str, user_id: str = DEMO_USER_ID) -> list[dict]:
+        with self._connect() as connection:
+            return list_credentials(connection, user_id, rp_id)
+
+    def issue_approval_challenge(
+        self,
+        kind: str,
+        receipt_id: str,
+        receipt_digest: str,
+        *,
+        rp_id: str,
+        user_id: str = DEMO_USER_ID,
+        now: datetime | None = None,
+    ) -> dict[str, Any]:
+        """Issue a one-time challenge bound to an awaiting receipt.
+
+        The review facts come from the stored receipt, never from model
+        output, so the confirmation overlay shows exactly what is signed.
+        """
+
+        issued_at = now or self._clock()
+        table, purpose = {
+            "single": ("review_receipts", "APPROVE_RECEIPT"),
+            "batch": ("batch_review_receipts", "APPROVE_BATCH"),
+        }[kind]
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                row = connection.execute(
+                    f"SELECT * FROM {table} WHERE receipt_id = ?", (receipt_id,)
+                ).fetchone()
+                if row is None:
+                    raise ReceiptRejected("RECEIPT_NOT_FOUND")
+                if row["user_id"] != user_id:
+                    raise ReceiptRejected("RECEIPT_USER_MISMATCH")
+                if row["receipt_digest"] != receipt_digest:
+                    raise ReceiptRejected("RECEIPT_DIGEST_MISMATCH")
+                if row["status"] == "EXECUTED":
+                    raise ReceiptRejected("RECEIPT_ALREADY_EXECUTED")
+                if row["status"] != "AWAITING_CONFIRMATION":
+                    raise ReceiptRejected(f"RECEIPT_{row['status']}")
+                if issued_at.astimezone(timezone.utc) >= datetime.fromisoformat(
+                    row["expires_at"]
+                ).astimezone(timezone.utc):
+                    raise ReceiptRejected("RECEIPT_EXPIRED")
+                credentials = list_credentials(connection, user_id, rp_id)
+                if not credentials:
+                    raise ReceiptRejected("SIGNING_CREDENTIAL_REQUIRED")
+                source = connection.execute(
+                    "SELECT label FROM accounts WHERE account_id = ?",
+                    (row["source_account_id"],),
+                ).fetchone()
+                if kind == "single":
+                    masked = connection.execute(
+                        "SELECT masked_destination FROM beneficiaries WHERE beneficiary_id = ?",
+                        (row["beneficiary_id"],),
+                    ).fetchone()
+                    items = [
+                        {
+                            "recipient_display_name": row["recipient_display_name"],
+                            "masked_destination": masked["masked_destination"] if masked else None,
+                            "amount_minor": row["amount_minor"],
+                        }
+                    ]
+                    total_minor = row["amount_minor"]
+                else:
+                    items = [
+                        dict(item)
+                        for item in connection.execute(
+                            """
+                            SELECT i.recipient_display_name, b.masked_destination,
+                                   i.amount_minor
+                            FROM batch_receipt_items i
+                            JOIN beneficiaries b ON b.beneficiary_id = i.beneficiary_id
+                            WHERE i.receipt_id = ? ORDER BY i.position
+                            """,
+                            (receipt_id,),
+                        ).fetchall()
+                    ]
+                    total_minor = row["total_minor"]
+                challenge = issue_challenge(
+                    connection,
+                    purpose=purpose,
+                    user_id=user_id,
+                    now=issued_at,
+                    receipt_id=receipt_id,
+                    receipt_digest=receipt_digest,
                 )
                 connection.commit()
-                return response
             except Exception:
                 connection.rollback()
                 raise
-
-    def execute_transfer(self, command: TransferCommand) -> dict[str, Any]:
-        """Compatibility entry point; all execution is receipt-backed."""
-
-        return self.execute_policy_transfer(command)
+        return {
+            **challenge,
+            "allow_credentials": credentials,
+            "review": {
+                "receipt_id": receipt_id,
+                "receipt_digest": receipt_digest,
+                "source_label": source["label"] if source else None,
+                "currency": row["currency"],
+                "total_minor": total_minor,
+                "items": items,
+                "receipt_expires_at": row["expires_at"],
+            },
+        }
 
     def approve_receipt(
         self,
@@ -1932,6 +2031,8 @@ class Database:
         receipt_digest: str,
         user_id: str,
         *,
+        assertion: DeviceAssertion | None,
+        context: ApprovalContext | None,
         now: datetime | None = None,
     ) -> dict[str, Any]:
         with self._connect() as connection:
@@ -1944,6 +2045,21 @@ class Database:
                 ).fetchone()
                 if receipt is None:
                     raise ReceiptRejected("RECEIPT_NOT_FOUND")
+                executed = connection.execute(
+                    "SELECT 1 FROM receipt_executions WHERE receipt_id = ?",
+                    (receipt_id,),
+                ).fetchone() is not None
+                approval = self._require_device_signature(
+                    connection,
+                    assertion,
+                    context,
+                    purpose="APPROVE_RECEIPT",
+                    receipt_id=receipt_id,
+                    receipt_digest=receipt_digest,
+                    user_id=user_id,
+                    executed=executed,
+                    now=approved_at,
+                )
                 response = self._execute_stored_receipt(
                     connection,
                     receipt,
@@ -1951,6 +2067,7 @@ class Database:
                     user_id=user_id,
                     method="USER_CONFIRMATION",
                     now=approved_at,
+                    approval=approval,
                 )
                 connection.commit()
                 return response
@@ -1973,6 +2090,7 @@ class Database:
         user_id: str,
         method: str,
         now: datetime,
+        approval: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         row = dict(receipt)
         if row["user_id"] != user_id:
@@ -2225,6 +2343,8 @@ class Database:
                 "currency": row["currency"],
             },
         }
+        if approval is not None:
+            response["approval"] = dict(approval)
         connection.execute(
             """
             UPDATE action_attempts

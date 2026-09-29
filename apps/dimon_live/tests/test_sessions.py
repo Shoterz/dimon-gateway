@@ -7,7 +7,9 @@ from pathlib import Path
 
 import httpx
 
+from apps.dimon_live.approval_gateway import b64url_encode
 from apps.dimon_live.model_adapter import ExtractedIntent
+from apps.dimon_live.tests.device_signer import SoftwareAuthenticator
 from apps.dimon_live.session_manager import OwnerAccessError, SessionManager
 
 
@@ -156,17 +158,47 @@ class SessionApiTests(unittest.TestCase):
                 async with httpx.AsyncClient(transport=transport, base_url="http://test") as first, httpx.AsyncClient(transport=transport, base_url="http://test") as second:
                     await first.get("/api/state")
                     await second.get("/api/state")
-                    result = await first.post(
+                    pending = (await first.post(
                         "/api/actions",
                         json={
                             "request_id": "00000000-0000-4000-8000-000000000902",
                             "text": "Send John Smith S$5 from savings.",
                         },
+                    )).json()
+                    choice = pending["receipt_choices"][0]
+                    device = SoftwareAuthenticator("http://test")
+                    registration = (await first.post("/api/signing/registration-challenge")).json()
+                    await first.post(
+                        "/api/signing/credentials",
+                        json={
+                            "challenge_id": registration["challenge_id"],
+                            "credential_kind": "WEBAUTHN_PLATFORM",
+                            "credential_id": device.credential_id,
+                            "public_key_spki": b64url_encode(device.public_key_spki),
+                            "algorithm": -7,
+                            "client_data_json": b64url_encode(
+                                device.client_data("webauthn.create", registration["challenge"])
+                            ),
+                            "authenticator_data": b64url_encode(device.authenticator_data()),
+                        },
+                    )
+                    digest = {"receipt_digest": choice["receipt_digest"]}
+                    # Visitor B can neither see nor be challenged for A's receipt.
+                    foreign = (await second.post(
+                        f"/api/receipts/{choice['receipt_id']}/challenge", json=digest
+                    )).json()
+                    challenge = (await first.post(
+                        f"/api/receipts/{choice['receipt_id']}/challenge", json=digest
+                    )).json()
+                    result = await first.post(
+                        f"/api/receipts/{choice['receipt_id']}/approve",
+                        json={**digest, "assertion": SoftwareAuthenticator.wire(device.sign(challenge))},
                     )
                     other = await second.get("/api/state")
-                    return result, other
+                    return result, other, foreign
 
-            result, other = asyncio.run(run())
+            result, other, foreign = asyncio.run(run())
+            self.assertEqual(foreign["reason_code"], "RECEIPT_NOT_FOUND")
             self.assertEqual(result.status_code, 200)
             self.assertEqual(result.json()["outcome"], "EXECUTED_SYNTHETIC_TRANSFER")
             self.assertEqual(other.json()["accounts"][0]["balance_minor"], 100000)

@@ -6,6 +6,7 @@ import os
 import logging
 from pathlib import Path
 from typing import Annotated, Literal
+from urllib.parse import urlparse
 from uuid import UUID, uuid4
 
 from dotenv import load_dotenv
@@ -13,10 +14,17 @@ from fastapi import FastAPI, HTTPException, Request, WebSocket
 from fastapi.responses import HTMLResponse, Response
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from .database import Database
+from .approval_gateway import (
+    ApprovalContext,
+    ApprovalRejected,
+    DeviceAssertion,
+    b64url_decode,
+)
+from .database import Database, ReceiptRejected
 from .inference import InferenceProviders
 from .model_adapter import Extractor
 from .provider_factory import build_inference_providers
+from .receipts import DEMO_USER_ID
 from .service import ActionService
 from .session_manager import SessionBoundaryError, SessionContext, SessionManager
 from .speech import SpeechService
@@ -46,10 +54,45 @@ class ActionRequest(BaseModel):
         return normalized
 
 
+B64Url = Annotated[str, Field(min_length=1, max_length=8192, pattern=r"^[A-Za-z0-9_-]+$")]
+ReceiptDigest = Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
+ChallengeId = Annotated[str, Field(pattern=r"^chal_[0-9a-f]{32}$")]
+
+
+class DeviceAssertionPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    challenge_id: ChallengeId
+    credential_id: Annotated[str, Field(min_length=1, max_length=1024, pattern=r"^[A-Za-z0-9_-]+$")]
+    client_data_json: B64Url
+    authenticator_data: B64Url
+    signature: B64Url
+
+
 class ReceiptApprovalRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    receipt_digest: Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
+    receipt_digest: ReceiptDigest
+    assertion: DeviceAssertionPayload
+
+
+class ReceiptChallengeRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    receipt_digest: ReceiptDigest
+
+
+class CredentialRegistrationRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    challenge_id: ChallengeId
+    credential_kind: Literal["WEBAUTHN_PLATFORM", "MOCK_DEVICE_KEY"]
+    credential_id: Annotated[str, Field(min_length=1, max_length=1024, pattern=r"^[A-Za-z0-9_-]+$")]
+    public_key_spki: B64Url
+    algorithm: Literal[-7, -257]
+    client_data_json: B64Url
+    authenticator_data: B64Url
+    signature: B64Url | None = None
 
 
 class ClarificationResponseRequest(BaseModel):
@@ -201,6 +244,109 @@ def create_app(
         result = service_for(context).process(str(action.request_id), action.text)
         return await attach_speech(result, context)
 
+    def approval_context(request: Request) -> ApprovalContext:
+        # The signature must name the exact origin this request came from
+        # (already checked against the allow-list by resolve()), and the RP ID
+        # is that origin's host. Neither value is taken from the request body.
+        origin = request.headers.get("origin")
+        if not origin:
+            origin = f"{request.url.scheme}://{request.headers.get('host', '')}"
+        origin = origin.rstrip("/")
+        return ApprovalContext(
+            rp_id=urlparse(origin).hostname or "",
+            allowed_origins=frozenset({origin}),
+        )
+
+    def blocked(reason_code: str, context: SessionContext) -> dict:
+        return {
+            "outcome": "BLOCKED",
+            "reason_code": reason_code,
+            "trace": [{"stage": reason_code}],
+            "state": context.database.get_state(),
+        }
+
+    @application.get("/api/signing/credentials")
+    async def list_signing_credentials(request: Request, response: Response):
+        context = resolve(request, response)
+        signing = approval_context(request)
+        return {
+            "rp_id": signing.rp_id,
+            "credentials": context.database.signing_credentials(signing.rp_id),
+        }
+
+    @application.post("/api/signing/registration-challenge")
+    async def signing_registration_challenge(request: Request, response: Response):
+        context = resolve(request, response)
+        signing = approval_context(request)
+        challenge = context.database.issue_registration_challenge()
+        return {
+            **challenge,
+            "rp_id": signing.rp_id,
+            "user": {"id": DEMO_USER_ID, "name": "Demo User"},
+            "existing_credentials": context.database.signing_credentials(signing.rp_id),
+        }
+
+    @application.post("/api/signing/credentials")
+    async def register_signing_credential(
+        request: Request,
+        response: Response,
+        registration: CredentialRegistrationRequest,
+    ):
+        context = resolve(request, response)
+        try:
+            return context.database.register_signing_credential(
+                challenge_id=registration.challenge_id,
+                credential_kind=registration.credential_kind,
+                credential_id=registration.credential_id,
+                public_key_spki=b64url_decode(registration.public_key_spki),
+                algorithm=registration.algorithm,
+                client_data_json=b64url_decode(registration.client_data_json),
+                authenticator_data=b64url_decode(registration.authenticator_data),
+                signature=(
+                    b64url_decode(registration.signature)
+                    if registration.signature is not None
+                    else None
+                ),
+                context=approval_context(request),
+            )
+        except ApprovalRejected as exc:
+            raise HTTPException(status_code=400, detail=exc.reason_code) from exc
+
+    async def receipt_challenge(
+        kind: str, receipt_id: str, request: Request, response: Response, digest: str
+    ) -> dict:
+        context = resolve(request, response)
+        try:
+            return context.database.issue_approval_challenge(
+                kind,
+                receipt_id,
+                digest,
+                rp_id=approval_context(request).rp_id,
+            )
+        except ReceiptRejected as exc:
+            return blocked(exc.reason_code, context)
+
+    @application.post("/api/receipts/{receipt_id}/challenge")
+    async def single_receipt_challenge(
+        request: Request,
+        response: Response,
+        receipt_id: str,
+        body: ReceiptChallengeRequest,
+    ):
+        return await receipt_challenge("single", receipt_id, request, response, body.receipt_digest)
+
+    @application.post("/api/batch-receipts/{receipt_id}/challenge")
+    async def batch_receipt_challenge(
+        request: Request,
+        response: Response,
+        receipt_id: str,
+        body: ReceiptChallengeRequest,
+    ):
+        return await receipt_challenge("batch", receipt_id, request, response, body.receipt_digest)
+
+    def device_assertion(approval: ReceiptApprovalRequest) -> DeviceAssertion:
+        return DeviceAssertion.from_wire(approval.assertion.model_dump())
+
     @application.post("/api/receipts/{receipt_id}/approve")
     async def approve_receipt(
         request: Request,
@@ -209,7 +355,16 @@ def create_app(
         approval: ReceiptApprovalRequest,
     ):
         context = resolve(request, response)
-        result = service_for(context).approve(receipt_id, approval.receipt_digest)
+        try:
+            assertion = device_assertion(approval)
+        except ApprovalRejected as exc:
+            return blocked(exc.reason_code, context)
+        result = service_for(context).approve(
+            receipt_id,
+            approval.receipt_digest,
+            assertion=assertion,
+            context=approval_context(request),
+        )
         return await attach_speech(result, context)
 
     @application.post("/api/batch-receipts/{receipt_id}/approve")
@@ -220,7 +375,16 @@ def create_app(
         approval: ReceiptApprovalRequest,
     ):
         context = resolve(request, response)
-        result = service_for(context).approve_batch(receipt_id, approval.receipt_digest)
+        try:
+            assertion = device_assertion(approval)
+        except ApprovalRejected as exc:
+            return blocked(exc.reason_code, context)
+        result = service_for(context).approve_batch(
+            receipt_id,
+            approval.receipt_digest,
+            assertion=assertion,
+            context=approval_context(request),
+        )
         return await attach_speech(result, context)
 
     @application.post("/api/clarifications/{clarification_id}/respond")
@@ -345,6 +509,14 @@ def create_app(
         return Response(
             (STATIC_DIR / "receipt_approval.mjs").read_text(encoding="utf-8"),
             media_type="application/javascript",
+        )
+
+    @application.get("/static/device_approval.mjs", include_in_schema=False)
+    async def device_approval_script():
+        return Response(
+            (STATIC_DIR / "device_approval.mjs").read_text(encoding="utf-8"),
+            media_type="application/javascript",
+            headers={"Cache-Control": "no-store"},
         )
 
     @application.get("/static/batch_receipt_approval.mjs", include_in_schema=False)

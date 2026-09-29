@@ -3,6 +3,7 @@ import { requestBatchReceiptApproval } from "./batch_receipt_approval.mjs";
 import { requestClarificationResponse } from "./clarification_response.mjs";
 import { requestAction } from "./action_request.mjs";
 import { accountDisplay } from "./account_display.mjs";
+import { DeviceApprover, wireAssertion } from "./device_approval.mjs";
 import {
   createVoiceAudioContext,
   VoiceDeadline,
@@ -37,6 +38,14 @@ const ui = {
   modelLabel: document.querySelector("#model-label"),
   voiceButton: document.querySelector("#voice-button"),
   voiceStatus: document.querySelector("#voice-status"),
+  approvalDialog: document.querySelector("#approval-dialog"),
+  approvalItems: document.querySelector("#approval-items"),
+  approvalSource: document.querySelector("#approval-source"),
+  approvalTotal: document.querySelector("#approval-total"),
+  approvalDigest: document.querySelector("#approval-digest"),
+  approvalMethod: document.querySelector("#approval-method"),
+  approvalConfirm: document.querySelector("#approval-confirm"),
+  approvalCancel: document.querySelector("#approval-cancel"),
 };
 
 let previousBalances = new Map();
@@ -114,6 +123,16 @@ const stageCopy = {
   SQLITE_COMMITTED: ["SQLite committed", "Balanced debit + credit"],
   CLOSE_RECIPIENT_MATCH: ["Close recipient match", "Confirmation required"],
   ACTION_CONFIRMATION_REQUIRED: ["Action confirmation", "No ledger mutation"],
+  SIGNED_APPROVAL_REQUIRED: ["Draft only", "Awaiting device signature"],
+  DEVICE_SIGNATURE_VERIFIED: ["Device signature verified", "Bound to this receipt digest"],
+  SIGNING_CREDENTIAL_REQUIRED: ["Device not enrolled", "No ledger mutation"],
+  APPROVAL_SIGNATURE_INVALID: ["Signature rejected", "Does not verify"],
+  APPROVAL_RECEIPT_MISMATCH: ["Signature rejected", "Signed a different receipt"],
+  APPROVAL_CHALLENGE_REPLAYED: ["Signature rejected", "Challenge already used"],
+  APPROVAL_CHALLENGE_EXPIRED: ["Signature rejected", "Challenge expired"],
+  APPROVAL_COUNTER_REPLAY: ["Signature rejected", "Stale or cloned authenticator"],
+  APPROVAL_ORIGIN_MISMATCH: ["Signature rejected", "Wrong origin"],
+  APPROVAL_USER_NOT_VERIFIED: ["Signature rejected", "Biometric not verified"],
   MISSING_SOURCE_ACCOUNT: ["Source required", "Clarification required"],
   NEGATED_ACTION: ["Negated action", "Execution prohibited"],
   AMBIGUOUS_RECIPIENT: ["Clarification required", "No ledger mutation"],
@@ -278,52 +297,179 @@ function setChoiceBusy(busy) {
   });
 }
 
-async function approveReceipt(choice) {
+const deviceApprover = new DeviceApprover();
+// Signed assertions per receipt, kept only so an interrupted response can be
+// retried with the identical signature (the gateway then returns the stored
+// outcome instead of moving money again).
+const signedAssertions = new Map();
+
+async function ensureSigningCredential() {
+  const response = await fetch("/api/signing/credentials", {cache: "no-store"});
+  const listing = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    const error = new Error(`Credential lookup returned HTTP ${response.status}`);
+    error.reasonCode = typeof listing.detail === "string" ? listing.detail : `HTTP_${response.status}`;
+    throw error;
+  }
+  if (await deviceApprover.usableCredential(listing.credentials)) return;
+  ui.elapsedLabel.textContent = "Enrolling this device for signed approval";
+  await deviceApprover.enroll();
+}
+
+function describeSigner(kind) {
+  return kind === "WEBAUTHN_PLATFORM"
+    ? {label: "Platform biometric · Windows Hello / Touch ID", action: "Approve with biometric", hold: false}
+    : {label: "Mock biometric · device-bound key (demo stand-in)", action: "Press and hold to sign", hold: true};
+}
+
+// The deterministic confirmation overlay. Every fact shown comes from the
+// server-stored receipt returned with the challenge, never from model text.
+function confirmOnDevice(challenge, signerKind) {
+  const review = challenge.review;
+  const signer = describeSigner(signerKind);
+  ui.approvalItems.innerHTML = review.items.map(item => `<div class="approval-item">
+      <span><small>To</small><strong>${escapeHtml(item.recipient_display_name)}</strong>${item.masked_destination ? `<em>${escapeHtml(item.masked_destination)}</em>` : ""}</span>
+      <span><small>Amount</small><strong>${escapeHtml(formatSgd(item.amount_minor))}</strong></span>
+    </div>`).join("");
+  ui.approvalSource.textContent = review.source_label || "—";
+  ui.approvalTotal.textContent = formatSgd(review.total_minor);
+  ui.approvalDigest.textContent = `${review.receipt_digest.slice(0, 16)}…`;
+  ui.approvalMethod.textContent = signer.label;
+  ui.approvalConfirm.textContent = signer.action;
+  ui.approvalConfirm.style.setProperty("--hold", "0");
+  return new Promise(resolve => {
+    let holdTimer = null;
+    let holdStarted = 0;
+    let frame = null;
+    const cleanup = result => {
+      clearTimeout(holdTimer);
+      cancelAnimationFrame(frame);
+      ui.approvalConfirm.onclick = null;
+      ui.approvalConfirm.onpointerdown = null;
+      ui.approvalConfirm.onpointerup = null;
+      ui.approvalConfirm.onpointerleave = null;
+      ui.approvalConfirm.onkeydown = null;
+      ui.approvalConfirm.onkeyup = null;
+      ui.approvalCancel.onclick = null;
+      ui.approvalDialog.oncancel = null;
+      ui.approvalDialog.close();
+      resolve(result);
+    };
+    const startHold = () => {
+      if (holdTimer) return;
+      holdStarted = performance.now();
+      const paint = () => {
+        const progress = Math.min(1, (performance.now() - holdStarted) / 1200);
+        ui.approvalConfirm.style.setProperty("--hold", String(progress));
+        frame = requestAnimationFrame(paint);
+      };
+      paint();
+      holdTimer = setTimeout(() => cleanup(true), 1200);
+    };
+    const stopHold = () => {
+      clearTimeout(holdTimer);
+      cancelAnimationFrame(frame);
+      holdTimer = null;
+      ui.approvalConfirm.style.setProperty("--hold", "0");
+    };
+    if (signer.hold) {
+      ui.approvalConfirm.onpointerdown = startHold;
+      ui.approvalConfirm.onpointerup = stopHold;
+      ui.approvalConfirm.onpointerleave = stopHold;
+      ui.approvalConfirm.onkeydown = event => {
+        if ((event.key === " " || event.key === "Enter") && !event.repeat) {
+          event.preventDefault();
+          startHold();
+        }
+      };
+      ui.approvalConfirm.onkeyup = stopHold;
+    } else {
+      ui.approvalConfirm.onclick = () => cleanup(true);
+    }
+    ui.approvalCancel.onclick = () => cleanup(false);
+    ui.approvalDialog.oncancel = event => {
+      event.preventDefault();
+      cleanup(false);
+    };
+    ui.approvalDialog.showModal();
+    ui.approvalCancel.focus();
+  });
+}
+
+function renderApprovalRefusal(reasonCode, detail) {
+  setOutcome("blocked", "!", "Approval not signed", reasonCode.replaceAll("_", " ").toLowerCase(), detail);
+  ui.commitStatus.className = "commit-status blocked";
+  ui.commitStatus.textContent = "No mutation";
+  ui.commitCode.textContent = `-- ${reasonCode}\n-- no device signature, no ledger write`;
+}
+
+async function signedApproval(collection, receipt, submit, interruptedDetail) {
   const started = performance.now();
   setChoiceBusy(true);
-  ui.elapsedLabel.textContent = "Receipt approval in flight";
   try {
-    const approval = await requestReceiptApproval(choice);
+    let assertion = signedAssertions.get(receipt.receipt_id);
+    if (!assertion) {
+      ui.elapsedLabel.textContent = "Requesting a one-time signing challenge";
+      await ensureSigningCredential();
+      const issued = await deviceApprover.requestChallenge(collection, receipt);
+      if (issued.kind === "BLOCKED") {
+        renderResult(issued.result, Math.round(performance.now() - started));
+        return;
+      }
+      const credential = await deviceApprover.usableCredential(issued.challenge.allow_credentials);
+      const confirmed = await confirmOnDevice(issued.challenge, credential?.kind);
+      if (!confirmed) {
+        renderApprovalRefusal("APPROVAL_CANCELLED", "You closed the confirmation. Nothing was signed and balances are unchanged.");
+        ui.elapsedLabel.textContent = "Approval cancelled";
+        return;
+      }
+      ui.elapsedLabel.textContent = "Waiting for the device signature";
+      assertion = wireAssertion(await deviceApprover.signChallenge(issued.challenge));
+      signedAssertions.set(receipt.receipt_id, assertion);
+    }
+    ui.elapsedLabel.textContent = "Signed approval in flight";
+    const approval = await submit(receipt, assertion);
     if (approval.kind === "UNKNOWN") {
       ui.outcomePanel.className = "outcome-panel clarification";
       ui.outcomeIndex.textContent = "?";
       ui.outcomeKicker.textContent = "Outcome unknown · safe retry available";
       ui.outcomeTitle.textContent = "The gateway response was interrupted.";
-      ui.outcomeDetail.textContent = "Do not create a new transfer. Retry this exact receipt to retrieve the stored result.";
+      ui.outcomeDetail.textContent = interruptedDetail;
       ui.commitStatus.className = "commit-status idle";
       ui.commitStatus.textContent = "Unknown";
-      ui.commitCode.textContent = `-- response interrupted: ${approval.message}\n-- ledger state unknown\n-- retry the same receipt ID + digest`;
+      ui.commitCode.textContent = `-- response interrupted: ${approval.message}\n-- ledger state unknown\n-- retry resends the identical signed approval`;
       ui.elapsedLabel.textContent = `${Math.round(performance.now() - started)} ms · response unknown`;
       return;
     }
+    signedAssertions.delete(receipt.receipt_id);
     renderResult(approval.result, Math.round(performance.now() - started));
+  } catch (error) {
+    console.error("signed approval failed", error);
+    signedAssertions.delete(receipt.receipt_id);
+    const reason = error?.reasonCode || (error?.name === "NotAllowedError" ? "BIOMETRIC_DECLINED" : "SIGNING_FAILED");
+    renderApprovalRefusal(reason, "The device did not produce a valid signature. Nothing was executed.");
+    ui.elapsedLabel.textContent = `${Math.round(performance.now() - started)} ms · not signed`;
   } finally {
     setChoiceBusy(false);
   }
 }
 
-async function approveBatchReceipt(receipt) {
-  const started = performance.now();
-  setChoiceBusy(true);
-  ui.elapsedLabel.textContent = "Batch approval in flight";
-  try {
-    const approval = await requestBatchReceiptApproval(receipt);
-    if (approval.kind === "UNKNOWN") {
-      ui.outcomePanel.className = "outcome-panel clarification";
-      ui.outcomeIndex.textContent = "?";
-      ui.outcomeKicker.textContent = "Outcome unknown · safe retry available";
-      ui.outcomeTitle.textContent = "The batch response was interrupted.";
-      ui.outcomeDetail.textContent = "Retry this exact batch receipt to retrieve its stored result.";
-      ui.commitStatus.className = "commit-status idle";
-      ui.commitStatus.textContent = "Unknown";
-      ui.commitCode.textContent = `-- response interrupted: ${approval.message}\n-- retry the same batch receipt ID + digest`;
-      ui.elapsedLabel.textContent = `${Math.round(performance.now() - started)} ms · response unknown`;
-      return;
-    }
-    renderResult(approval.result, Math.round(performance.now() - started));
-  } finally {
-    setChoiceBusy(false);
-  }
+function approveReceipt(choice) {
+  return signedApproval(
+    "receipts",
+    choice,
+    requestReceiptApproval,
+    "Do not create a new transfer. Retry this exact receipt to retrieve the stored result.",
+  );
+}
+
+function approveBatchReceipt(receipt) {
+  return signedApproval(
+    "batch-receipts",
+    receipt,
+    requestBatchReceiptApproval,
+    "Retry this exact batch receipt to retrieve its stored result.",
+  );
 }
 
 async function waitForResultAudio(artifactId, generation) {
@@ -365,7 +511,7 @@ function renderResult(result, elapsedMs) {
     const itemCount = (result.resolved_actions || []).length;
     setOutcome("success", "✓", "Synthetic batch settled", "The complete plan moved exactly once.", `${formatSgd(result.amount_minor)} was split across ${itemCount} transfers in one atomic database transaction.`);
   } else if (result.outcome === "BATCH_CONFIRMATION_REQUEST") {
-    setOutcome("clarification", "∑", "Exact batch approval required", "Confirm exact batch", "Both stored transfers will settle together. No balance changes occur until you approve this immutable receipt.");
+    setOutcome("clarification", "∑", "Exact batch approval required", "Confirm exact batch", "Both stored transfers will settle together. No balance changes occur until your device signs this immutable receipt.");
     const receipt = result.batch_receipt;
     const expiry = new Date(receipt.expires_at);
     const expiryLabel = Number.isNaN(expiry.getTime())
@@ -382,7 +528,7 @@ function renderResult(result, elapsedMs) {
       </div>
       <div class="batch-total"><span>Total debit</span><strong>${escapeHtml(formatSgd(receipt.total_minor))}</strong></div>
       <p class="batch-expiry">Expires ${escapeHtml(expiryLabel)}</p>
-      <button type="button" class="candidate-choice">Confirm exact batch</button>
+      <button type="button" class="candidate-choice">Review &amp; sign batch</button>
     </article>`;
     ui.candidateList.querySelector(".candidate-choice").addEventListener("click", async () => {
       await approveBatchReceipt(receipt);
@@ -393,7 +539,7 @@ function renderResult(result, elapsedMs) {
       enterClarificationMode(result);
       return;
     }
-    setOutcome("clarification", "?", "Exact receipt approval required", result.question || "Which recipient did you mean?", "Confirming executes these stored facts directly. Qwen will not interpret the request again.");
+    setOutcome("clarification", "?", "Exact receipt approval required", result.question || "Which recipient did you mean?", "The AI only drafted this. Nothing moves until your device signs these exact stored facts; Qwen will not interpret the request again.");
     const choices = result.receipt_choices || [];
     ui.candidateList.hidden = false;
     ui.candidateList.innerHTML = choices.map((choice, index) => {
@@ -415,7 +561,7 @@ function renderResult(result, elapsedMs) {
           ${choice.payment_reference ? `<span><small>Reference</small><strong>${escapeHtml(choice.payment_reference)}</strong></span>` : ""}
           <span><small>Expires</small><strong>${escapeHtml(expiryLabel)}</strong></span>
         </div>
-        <button type="button" class="candidate-choice" data-index="${index}">Confirm exact receipt</button>
+        <button type="button" class="candidate-choice" data-index="${index}">Review &amp; sign</button>
       </article>`;
     }).join("");
     ui.candidateList.querySelectorAll(".candidate-choice").forEach(button => {

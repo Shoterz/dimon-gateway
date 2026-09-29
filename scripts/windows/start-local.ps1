@@ -69,7 +69,8 @@ foreach ($service in $services) {
 }
 
 $port = if ($env:DIMON_PORT) { $env:DIMON_PORT } else { "8890" }
-$appUrl = "http://127.0.0.1:$port"
+# localhost, not 127.0.0.1: WebAuthn (Windows Hello) rejects IP-address origins.
+$appUrl = "http://localhost:$port"
 if (Test-Healthy "$appUrl/static/app.css") {
     Write-Host "app: already running"
 } else {

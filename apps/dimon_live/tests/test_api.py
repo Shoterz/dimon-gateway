@@ -6,6 +6,9 @@ from pathlib import Path
 
 import httpx
 
+from apps.dimon_live.approval_gateway import b64url_encode
+from apps.dimon_live.tests.device_signer import SoftwareAuthenticator
+
 from apps.dimon_live.model_adapter import ExtractedIntent
 
 
@@ -78,6 +81,43 @@ class DimonLiveApiTests(unittest.TestCase):
 
         return asyncio.run(send())
 
+    def enroll_device(self):
+        self.device = SoftwareAuthenticator("http://test")
+        challenge = self.request("POST", "/api/signing/registration-challenge").json()
+        self.assertEqual(challenge["rp_id"], "test")
+        response = self.request(
+            "POST",
+            "/api/signing/credentials",
+            json={
+                "challenge_id": challenge["challenge_id"],
+                "credential_kind": "WEBAUTHN_PLATFORM",
+                "credential_id": self.device.credential_id,
+                "public_key_spki": b64url_encode(self.device.public_key_spki),
+                "algorithm": -7,
+                "client_data_json": b64url_encode(
+                    self.device.client_data("webauthn.create", challenge["challenge"])
+                ),
+                "authenticator_data": b64url_encode(self.device.authenticator_data()),
+            },
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+
+    def signed_body(self, collection, receipt_id, digest, **sign_options):
+        if not hasattr(self, "device"):
+            self.enroll_device()
+        challenge = self.request(
+            "POST",
+            f"/api/{collection}/{receipt_id}/challenge",
+            json={"receipt_digest": digest},
+        ).json()
+        self.assertIn("challenge_id", challenge, challenge)
+        return {
+            "receipt_digest": digest,
+            "assertion": SoftwareAuthenticator.wire(
+                self.device.sign(challenge, **sign_options)
+            ),
+        }
+
     def post_vague_alicia(self):
         self.extractor.intent = {
             **GOLDEN_INTENT,
@@ -114,7 +154,7 @@ class DimonLiveApiTests(unittest.TestCase):
         )
         self.assertEqual(paynow["paynow_proxy"], "8695 2933")
 
-    def test_post_action_executes_eligible_transfer(self):
+    def test_post_action_drafts_and_only_a_signed_approval_executes(self):
         response = self.request(
             "POST",
             "/api/actions",
@@ -122,10 +162,98 @@ class DimonLiveApiTests(unittest.TestCase):
         )
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(
-            response.json()["outcome"], "EXECUTED_SYNTHETIC_TRANSFER"
+        pending = response.json()
+        self.assertEqual(pending["outcome"], "CLARIFICATION_REQUEST")
+        self.assertEqual(pending["trace"][-1]["stage"], "SIGNED_APPROVAL_REQUIRED")
+        self.assertEqual(pending["state"]["accounts"][0]["balance_minor"], 100000)
+        choice = pending["receipt_choices"][0]
+
+        unsigned = self.request(
+            "POST",
+            f"/api/receipts/{choice['receipt_id']}/approve",
+            json={"receipt_digest": choice["receipt_digest"]},
         )
-        self.assertEqual(response.json()["state"]["accounts"][0]["balance_minor"], 95000)
+        self.assertEqual(unsigned.status_code, 422)
+
+        executed = self.request(
+            "POST",
+            f"/api/receipts/{choice['receipt_id']}/approve",
+            json=self.signed_body("receipts", choice["receipt_id"], choice["receipt_digest"]),
+        )
+        self.assertEqual(executed.json()["outcome"], "EXECUTED_SYNTHETIC_TRANSFER")
+        self.assertEqual(executed.json()["state"]["accounts"][0]["balance_minor"], 95000)
+
+    def test_challenge_requires_an_enrolled_device(self):
+        choice = self.post_vague_alicia().json()["receipt_choices"][0]
+
+        response = self.request(
+            "POST",
+            f"/api/receipts/{choice['receipt_id']}/challenge",
+            json={"receipt_digest": choice["receipt_digest"]},
+        )
+
+        self.assertEqual(
+            (response.json()["outcome"], response.json()["reason_code"]),
+            ("BLOCKED", "SIGNING_CREDENTIAL_REQUIRED"),
+        )
+
+    def test_challenge_review_shows_stored_receipt_facts(self):
+        self.enroll_device()
+        choice = self.post_vague_alicia().json()["receipt_choices"][0]
+
+        challenge = self.request(
+            "POST",
+            f"/api/receipts/{choice['receipt_id']}/challenge",
+            json={"receipt_digest": choice["receipt_digest"]},
+        ).json()
+
+        self.assertEqual(challenge["review"]["total_minor"], 500)
+        self.assertEqual(
+            challenge["review"]["items"][0]["recipient_display_name"], "Alicia Powell"
+        )
+        self.assertEqual(
+            [item["credential_id"] for item in challenge["allow_credentials"]],
+            [self.device.credential_id],
+        )
+
+    def test_signature_from_another_origin_is_rejected(self):
+        choice = self.post_vague_alicia().json()["receipt_choices"][0]
+
+        response = self.request(
+            "POST",
+            f"/api/receipts/{choice['receipt_id']}/approve",
+            json=self.signed_body(
+                "receipts",
+                choice["receipt_id"],
+                choice["receipt_digest"],
+                origin="https://attacker.example",
+            ),
+        )
+
+        self.assertEqual(response.json()["reason_code"], "APPROVAL_ORIGIN_MISMATCH")
+        self.assertEqual(len(response.json()["state"]["transactions"]), 0)
+
+    def test_registration_with_foreign_origin_is_refused(self):
+        device = SoftwareAuthenticator("https://attacker.example")
+        challenge = self.request("POST", "/api/signing/registration-challenge").json()
+        response = self.request(
+            "POST",
+            "/api/signing/credentials",
+            json={
+                "challenge_id": challenge["challenge_id"],
+                "credential_kind": "WEBAUTHN_PLATFORM",
+                "credential_id": device.credential_id,
+                "public_key_spki": b64url_encode(device.public_key_spki),
+                "algorithm": -7,
+                "client_data_json": b64url_encode(
+                    device.client_data("webauthn.create", challenge["challenge"])
+                ),
+                "authenticator_data": b64url_encode(device.authenticator_data(rp_id="test")),
+            },
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["detail"], "APPROVAL_ORIGIN_MISMATCH")
 
     def test_amount_clarification_endpoint_is_strict_and_does_not_recall_model(self):
         self.extractor.intent = {
@@ -214,7 +342,7 @@ class DimonLiveApiTests(unittest.TestCase):
         response = self.request(
             "POST",
             f"/api/receipts/{choice['receipt_id']}/approve",
-            json={"receipt_digest": choice["receipt_digest"]},
+            json=self.signed_body("receipts", choice["receipt_id"], choice["receipt_digest"]),
         )
 
         self.assertEqual(response.status_code, 200)
@@ -294,12 +422,11 @@ class DimonLiveApiTests(unittest.TestCase):
         ):
             with self.subTest(body=body):
                 self.assertEqual(self.request("POST", path, json=body).status_code, 422)
-        first = self.request(
-            "POST", path, json={"receipt_digest": receipt["receipt_digest"]}
+        signed = self.signed_body(
+            "batch-receipts", receipt["receipt_id"], receipt["receipt_digest"]
         )
-        second = self.request(
-            "POST", path, json={"receipt_digest": receipt["receipt_digest"]}
-        )
+        first = self.request("POST", path, json=signed)
+        second = self.request("POST", path, json=signed)
         self.assertEqual(first.status_code, 200)
         self.assertEqual(first.json()["outcome"], "EXECUTED_SYNTHETIC_BATCH")
         self.assertEqual(
@@ -309,17 +436,24 @@ class DimonLiveApiTests(unittest.TestCase):
     def test_valid_shape_wrong_digest_is_non_mutating_block(self):
         choice = self.post_vague_alicia().json()["receipt_choices"][0]
 
+        signed = self.signed_body("receipts", choice["receipt_id"], choice["receipt_digest"])
         response = self.request(
             "POST",
             f"/api/receipts/{choice['receipt_id']}/approve",
-            json={"receipt_digest": "0" * 64},
+            json={**signed, "receipt_digest": "0" * 64},
         )
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(
             (response.json()["outcome"], response.json()["reason_code"]),
-            ("BLOCKED", "RECEIPT_DIGEST_MISMATCH"),
+            ("BLOCKED", "APPROVAL_RECEIPT_MISMATCH"),
         )
+        challenge = self.request(
+            "POST",
+            f"/api/receipts/{choice['receipt_id']}/challenge",
+            json={"receipt_digest": "0" * 64},
+        )
+        self.assertEqual(challenge.json()["reason_code"], "RECEIPT_DIGEST_MISMATCH")
         self.assertEqual(len(response.json()["state"]["transactions"]), 0)
 
     def test_post_action_rejects_blank_text_without_calling_extractor(self):
@@ -445,9 +579,13 @@ class DimonLiveApiTests(unittest.TestCase):
 
         self.assertEqual(client_response.status_code, 200)
         self.assertIn("candidate-choice", script)
-        self.assertIn("requestReceiptApproval(choice)", script)
+        self.assertIn("requestReceiptApproval,", script)
+        self.assertIn("deviceApprover.signChallenge(issued.challenge)", script)
         self.assertIn("/api/receipts/${choice.receipt_id}/approve", client)
-        self.assertIn("receipt_digest: choice.receipt_digest", client)
+        self.assertIn("receipt_digest: choice.receipt_digest, assertion", client)
+        device = self.request("GET", "/static/device_approval.mjs")
+        self.assertEqual(device.status_code, 200)
+        self.assertIn('userVerification: "required"', device.text)
         self.assertNotIn("function candidateCommand", script)
         self.assertNotIn(
             "ui.input.value = result.confirmation_command",

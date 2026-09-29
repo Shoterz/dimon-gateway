@@ -1,9 +1,11 @@
-export async function requestReceiptApproval(choice, fetchImpl = globalThis.fetch) {
+// Retrying an interrupted approval resends the identical signed assertion;
+// the gateway returns the stored outcome instead of moving money again.
+export async function requestReceiptApproval(choice, assertion, fetchImpl = globalThis.fetch) {
   const url = `/api/receipts/${choice.receipt_id}/approve`;
   const options = {
     method: "POST",
     headers: {"Content-Type": "application/json"},
-    body: JSON.stringify({receipt_digest: choice.receipt_digest}),
+    body: JSON.stringify({receipt_digest: choice.receipt_digest, assertion}),
   };
 
   try {

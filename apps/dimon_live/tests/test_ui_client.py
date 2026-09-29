@@ -334,8 +334,9 @@ class ReceiptApprovalClientTests(unittest.TestCase):
               json: async () => ({{transaction_id: "txn_fixed", idempotent_replay: true}}),
             }};
           }};
-          const first = await requestReceiptApproval(choice, fakeFetch);
-          const second = await requestReceiptApproval(choice, fakeFetch);
+          const assertion = {{challenge_id: "chal_fixed", signature: "sig"}};
+          const first = await requestReceiptApproval(choice, assertion, fakeFetch);
+          const second = await requestReceiptApproval(choice, assertion, fakeFetch);
           process.stdout.write(JSON.stringify({{first, second, calls}}));
         """
 
@@ -358,11 +359,17 @@ class ReceiptApprovalClientTests(unittest.TestCase):
             [
                 {
                     "url": "/api/receipts/receipt_fixed/approve",
-                    "body": {"receipt_digest": "a" * 64},
+                    "body": {
+                        "receipt_digest": "a" * 64,
+                        "assertion": {"challenge_id": "chal_fixed", "signature": "sig"},
+                    },
                 },
                 {
                     "url": "/api/receipts/receipt_fixed/approve",
-                    "body": {"receipt_digest": "a" * 64},
+                    "body": {
+                        "receipt_digest": "a" * 64,
+                        "assertion": {"challenge_id": "chal_fixed", "signature": "sig"},
+                    },
                 },
             ],
         )
@@ -382,8 +389,9 @@ class ReceiptApprovalClientTests(unittest.TestCase):
             if (attempt === 1) throw new TypeError("response interrupted");
             return {{ok: true, json: async () => ({{batch_transaction_id: "batch_txn_fixed"}})}};
           }};
-          const first = await requestBatchReceiptApproval(receipt, fakeFetch);
-          const second = await requestBatchReceiptApproval(receipt, fakeFetch);
+          const assertion = {{challenge_id: "chal_fixed", signature: "sig"}};
+          const first = await requestBatchReceiptApproval(receipt, assertion, fakeFetch);
+          const second = await requestBatchReceiptApproval(receipt, assertion, fakeFetch);
           process.stdout.write(JSON.stringify({{first, second, calls}}));
         """
 
@@ -405,11 +413,17 @@ class ReceiptApprovalClientTests(unittest.TestCase):
             [
                 {
                     "url": "/api/batch-receipts/batch_receipt_fixed/approve",
-                    "body": {"receipt_digest": "a" * 64},
+                    "body": {
+                        "receipt_digest": "a" * 64,
+                        "assertion": {"challenge_id": "chal_fixed", "signature": "sig"},
+                    },
                 },
                 {
                     "url": "/api/batch-receipts/batch_receipt_fixed/approve",
-                    "body": {"receipt_digest": "a" * 64},
+                    "body": {
+                        "receipt_digest": "a" * 64,
+                        "assertion": {"challenge_id": "chal_fixed", "signature": "sig"},
+                    },
                 },
             ],
         )
