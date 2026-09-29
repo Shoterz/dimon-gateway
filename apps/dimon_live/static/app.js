@@ -30,7 +30,8 @@ const ui = {
   traceList: document.querySelector("#trace-list"),
   elapsedLabel: document.querySelector("#elapsed-label"),
   ledgerBody: document.querySelector("#ledger-body"),
-  commitCode: document.querySelector("#commit-code code"),
+  commitSummary: document.querySelector("#commit-summary"),
+  commitNote: document.querySelector("#commit-note"),
   commitStatus: document.querySelector("#commit-status"),
   healthIndicator: document.querySelector("#health-indicator"),
   healthText: document.querySelector("#health-text"),
@@ -123,7 +124,7 @@ const stageCopy = {
   SOURCE_DEFAULTED: ["Source defaulted", "Only eligible user account"],
   RECIPIENT_RESOLVED: ["Recipient resolved", "Saved beneficiary ID"],
   ELIGIBILITY_PASSED: ["Eligibility passed", "Exact, funded, conflict-free"],
-  SQLITE_COMMITTED: ["SQLite committed", "Balanced debit + credit"],
+  SQLITE_COMMITTED: ["Ledger settled", "Matching debit and credit"],
   CLOSE_RECIPIENT_MATCH: ["Close recipient match", "Confirmation required"],
   ACTION_CONFIRMATION_REQUIRED: ["Action confirmation", "No ledger mutation"],
   SIGNED_APPROVAL_REQUIRED: ["Draft only", "Awaiting device signature"],
@@ -159,7 +160,7 @@ const stageCopy = {
   INVALID_MODEL_OUTPUT: ["Model output rejected", "No ledger mutation"],
   MODEL_UNAVAILABLE: ["Qwen unavailable", "No ledger mutation"],
   UNSUPPORTED_ACTION: ["Action unsupported", "No ledger mutation"],
-  DATABASE_ERROR: ["Database rolled back", "No ledger mutation"],
+  DATABASE_ERROR: ["Could not save", "Nothing moved"],
   IDEMPOTENT_REPLAY: ["Existing result returned", "No second debit"],
   RECEIPT_APPROVAL_RECEIVED: ["Receipt approval", "Stored coordinates received"],
   RECEIPT_REVALIDATED: ["Receipt revalidated", "Digest, owner, state and balance"],
@@ -172,7 +173,7 @@ const stageCopy = {
   RECEIPT_ALREADY_EXECUTED: ["Receipt already settled", "Authorization path differs"],
   BATCH_RECEIPT_APPROVAL_RECEIVED: ["Batch approval", "Stored batch coordinates received"],
   BATCH_RECEIPT_REVALIDATED: ["Batch revalidated", "Items, mappings, digest and funds"],
-  SQLITE_BATCH_COMMITTED: ["Atomic SQLite commit", "One transaction · zero-sum batch"],
+  SQLITE_BATCH_COMMITTED: ["Batch settled", "All payments together, all or none"],
   BATCH_CONFIRMATION_REQUIRED: ["Batch confirmation", "No ledger mutation"],
   AMBIGUOUS_BATCH_BINDING: ["Batch binding rejected", "Restate one amount per recipient"],
   BATCH_RECIPIENT_COUNT_MISMATCH: ["Batch count rejected", "One amount per recipient"],
@@ -262,50 +263,69 @@ function enterClarificationMode(result) {
   ui.input.focus();
 }
 
+// The settlement panel speaks plainly: what moved, between whom, how it was
+// approved, and the reference to quote. No database statements are shown.
+function setSettlement(state, statusText, rows, note) {
+  ui.commitStatus.className = `commit-status ${state}`;
+  ui.commitStatus.textContent = statusText;
+  ui.commitSummary.innerHTML = rows
+    .map(([label, value]) => `<div><dt>${escapeHtml(label)}</dt><dd>${escapeHtml(value)}</dd></div>`)
+    .join("");
+  ui.commitSummary.hidden = rows.length === 0;
+  ui.commitNote.textContent = note || "";
+}
+
+function accountLabel(result, accountId) {
+  const account = (result.state?.accounts || []).find(item => item.account_id === accountId);
+  return account ? account.label : "your account";
+}
+
+function approvalLabel(result) {
+  const kind = result.approval?.credential_kind;
+  if (kind === "WEBAUTHN_PLATFORM") return "Your device biometric (Windows Hello / Touch ID)";
+  if (kind === "MOCK_DEVICE_KEY") return "Mock biometric on this device";
+  return "Your device signature";
+}
+
+function reasonLabel(code) {
+  const copy = stageCopy[code];
+  return copy ? copy[0] : String(code || "Not completed").replaceAll("_", " ").toLowerCase();
+}
+
+function reference(id) {
+  return id ? `${id.slice(0, 18)}…` : "—";
+}
+
 function renderCommit(result) {
   if (result.outcome === "EXECUTED_SYNTHETIC_BATCH") {
     const actions = result.resolved_actions || [];
-    const source = actions[0] || {};
-    const lines = [
-      "BEGIN IMMEDIATE;",
-      `UPDATE accounts SET balance_minor = balance_minor - ${result.amount_minor}`,
-      `  WHERE account_id = '${source.source_account_id}';`,
-    ];
-    actions.forEach(action => {
-      lines.push(`UPDATE accounts SET balance_minor = balance_minor + ${action.amount_minor}`);
-      lines.push(`  WHERE account_id = '${action.destination_account_id}';`);
-    });
-    lines.push(
-      "INSERT INTO batch_ledger_entries (..., delta_minor)",
-      `  VALUES (..., -${result.amount_minor}), ${actions.map(action => `(..., +${action.amount_minor})`).join(", ")};`,
-      "-- invariant: SUM(delta_minor) = 0",
-      `COMMIT;  -- ${result.batch_transaction_id}`,
-    );
-    ui.commitStatus.className = "commit-status committed";
-    ui.commitStatus.textContent = "Atomic commit";
-    ui.commitCode.textContent = lines.join("\n");
+    const source = accountLabel(result, actions[0]?.source_account_id);
+    setSettlement("committed", "Settled", [
+      ["From", source],
+      ...actions.map(action => [
+        "To",
+        `${action.recipient_display_name}${action.masked_destination ? ` (${action.masked_destination})` : ""} · ${formatSgd(action.amount_minor)}`,
+      ]),
+      ["Total debited", formatSgd(result.amount_minor)],
+      ["Approved with", approvalLabel(result)],
+      ["Reference", reference(result.batch_transaction_id)],
+    ], "All payments settled together in one step: either every payment moved or none did. Money out equals money in.");
     return;
   }
   if (result.outcome !== "EXECUTED_SYNTHETIC_TRANSFER") {
-    ui.commitStatus.className = "commit-status blocked";
-    ui.commitStatus.textContent = "No mutation";
-    ui.commitCode.textContent = `-- ${result.reason_code || result.outcome}\nROLLBACK;\n-- balances unchanged`;
+    setSettlement("blocked", "Nothing moved", [
+      ["Result", reasonLabel(result.reason_code || result.outcome)],
+    ], "No money moved and every balance is unchanged.");
     return;
   }
   const action = result.resolved_action;
-  ui.commitStatus.className = "commit-status committed";
-  ui.commitStatus.textContent = "Committed";
-  ui.commitCode.textContent = [
-    "BEGIN IMMEDIATE;",
-    `UPDATE accounts SET balance_minor = balance_minor - ${action.amount_minor}`,
-    `  WHERE account_id = '${action.source_account_id}';`,
-    `UPDATE accounts SET balance_minor = balance_minor + ${action.amount_minor}`,
-    `  WHERE account_id = '${action.destination_account_id}';`,
-    "INSERT INTO ledger_entries (..., delta_minor)",
-    `  VALUES (..., -${action.amount_minor}), (..., +${action.amount_minor});`,
-    "-- invariant: SUM(delta_minor) = 0",
-    `COMMIT;  -- ${result.transaction_id}`,
-  ].join("\n");
+  setSettlement("committed", "Settled", [
+    ["From", accountLabel(result, action.source_account_id)],
+    ["To", `${action.recipient_display_name}${action.masked_destination ? ` (${action.masked_destination})` : ""}`],
+    ["Amount", formatSgd(action.amount_minor)],
+    ["Approved with", approvalLabel(result)],
+    ["Reference", reference(result.transaction_id)],
+  ], "Recorded as a matching debit and credit: money out equals money in, exactly once.");
 }
 
 function setChoiceBusy(busy) {
@@ -445,9 +465,8 @@ function appendEvidenceLink(receiptId) {
 
 function renderApprovalRefusal(reasonCode, detail) {
   setOutcome("blocked", "!", "Approval not signed", reasonCode.replaceAll("_", " ").toLowerCase(), detail);
-  ui.commitStatus.className = "commit-status blocked";
-  ui.commitStatus.textContent = "No mutation";
-  ui.commitCode.textContent = `-- ${reasonCode}\n-- no device signature, no ledger write`;
+  setSettlement("blocked", "Nothing moved", [["Result", reasonLabel(reasonCode)]],
+    "Without your device signature nothing can move; balances are unchanged.");
 }
 
 async function signedApproval(collection, receipt, submit, interruptedDetail) {
@@ -485,9 +504,8 @@ async function signedApproval(collection, receipt, submit, interruptedDetail) {
       ui.outcomeKicker.textContent = "Outcome unknown · safe retry available";
       ui.outcomeTitle.textContent = "The gateway response was interrupted.";
       ui.outcomeDetail.textContent = interruptedDetail;
-      ui.commitStatus.className = "commit-status idle";
-      ui.commitStatus.textContent = "Unknown";
-      ui.commitCode.textContent = `-- response interrupted: ${approval.message}\n-- ledger state unknown\n-- retry resends the identical signed approval`;
+      setSettlement("idle", "Unknown", [["Connection", approval.message]],
+        "The reply was lost. Retrying resends the same signed approval, so the transfer can settle at most once.");
       ui.elapsedLabel.textContent = `${Math.round(performance.now() - started)} ms · response unknown`;
       return;
     }
@@ -916,9 +934,8 @@ ui.form.addEventListener("submit", async event => {
       ui.outcomeKicker.textContent = "Outcome unknown · safe retry available";
       ui.outcomeTitle.textContent = "The first request was interrupted.";
       ui.outcomeDetail.textContent = "Retry sends the identical request UUID and text. The ledger may already have settled it exactly once.";
-      ui.commitStatus.className = "commit-status idle";
-      ui.commitStatus.textContent = "Unknown";
-      ui.commitCode.textContent = `-- response interrupted: ${actionResponse.message}\n-- ledger state unknown\n-- retry the same request UUID + text`;
+      setSettlement("idle", "Unknown", [["Connection", actionResponse.message]],
+        "The reply was lost. Retrying sends the identical request, so nothing can happen twice.");
       ui.elapsedLabel.textContent = `${Math.round(performance.now() - started)} ms · response unknown`;
       return;
     }
@@ -927,8 +944,7 @@ ui.form.addEventListener("submit", async event => {
     renderResult(actionResponse.result, Math.round(performance.now() - started));
   } catch (error) {
     setOutcome("failed", "×", "Gateway unavailable", "The local application did not complete the request.", error.message);
-    ui.commitStatus.className = "commit-status blocked";
-    ui.commitStatus.textContent = "No mutation";
+    setSettlement("blocked", "Nothing moved", [], "The request did not complete; balances are unchanged.");
   } finally {
     setBusy(false);
     ui.input.focus();
@@ -946,9 +962,7 @@ ui.resetButton.addEventListener("click", async () => {
     renderState(await response.json());
     setOutcome("waiting", "00", "Demo reset", "The seed ledger is restored.", "Enter a new natural-language transfer when ready.");
     ui.traceList.innerHTML = '<li class="trace-step dormant"><span></span><div><strong>Awaiting intention</strong><small>No active run</small></div></li>';
-    ui.commitStatus.className = "commit-status idle";
-    ui.commitStatus.textContent = "Idle";
-    ui.commitCode.textContent = "-- seed state restored\nSELECT balance_minor FROM accounts;";
+    setSettlement("idle", "Idle", [], "Demo balances restored. No transfer has settled yet.");
     ui.elapsedLabel.textContent = "No active run";
   } catch (error) {
     setOutcome("failed", "×", "Reset failed", "The current ledger was left in place.", error.message);

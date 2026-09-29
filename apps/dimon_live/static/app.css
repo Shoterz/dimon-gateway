@@ -171,7 +171,11 @@ audio { width: 100%; max-width: 360px; height: 32px; margin-top: 14px; }
 .commit-status { padding: 5px 8px; border: 1px solid var(--line); color: var(--muted); font: 700 9px/1 ui-monospace, monospace; text-transform: uppercase; }
 .commit-status.committed { border-color: rgba(120,224,207,.5); color: var(--signal); }
 .commit-status.blocked { border-color: rgba(255,123,112,.5); color: var(--coral); }
-pre { margin: 17px 0 0; padding: 15px; overflow-x: auto; border: 1px solid #253238; background: #080c0e; color: #a9bab5; font: 11px/1.7 ui-monospace, monospace; }
+.commit-summary { display: grid; gap: 1px; margin: 17px 0 0; border: 1px solid #253238; background: #253238; }
+.commit-summary div { display: grid; grid-template-columns: minmax(96px, 30%) 1fr; gap: 12px; padding: 9px 12px; background: #080c0e; }
+.commit-summary dt { color: var(--muted); font-size: 12px; }
+.commit-summary dd { margin: 0; color: var(--paper); font-size: 13px; overflow-wrap: anywhere; }
+.commit-note { margin: 12px 0 0; color: var(--muted); font-size: 12px; line-height: 1.5; }
 .text-button { border: 0; padding: 0; background: transparent; color: var(--muted); font-size: 11px; text-decoration: underline; text-underline-offset: 3px; }
 .text-button:hover { color: var(--paper); }
 .table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }

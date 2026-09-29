@@ -27,7 +27,7 @@
     <main class="workspace">
       <section class="command-column" aria-labelledby="page-title">
         <div class="intro">
-          <p class="eyebrow">Natural language → SQLite</p>
+          <p class="eyebrow">Natural language → signed settlement</p>
           <h1 id="page-title">Say it.<br><em>Watch it settle.</em></h1>
           <p class="lede">Qwen proposes the intent. Deterministic code decides whether this synthetic ledger may move.</p>
         </div>
@@ -139,20 +139,20 @@
             <li class="trace-step dormant"><span></span><div><strong>Qwen intent</strong><small>Waiting for input</small></div></li>
             <li class="trace-step dormant"><span></span><div><strong>Identity resolution</strong><small>Server-owned IDs only</small></div></li>
             <li class="trace-step dormant"><span></span><div><strong>Eligibility policy</strong><small>Exact and conflict-free</small></div></li>
-            <li class="trace-step dormant"><span></span><div><strong>SQLite commit</strong><small>Balanced debit + credit</small></div></li>
+            <li class="trace-step dormant"><span></span><div><strong>Ledger settled</strong><small>Matching debit and credit</small></div></li>
           </ol>
         </section>
 
         <section id="commit-panel" class="commit-panel" aria-labelledby="commit-title">
           <div class="commit-header">
             <div>
-              <p class="eyebrow">Server-owned operation</p>
-              <h2 id="commit-title">Database proof</h2>
+              <p class="eyebrow">From the server's ledger record</p>
+              <h2 id="commit-title">Settlement summary</h2>
             </div>
             <span id="commit-status" class="commit-status idle">Idle</span>
           </div>
-          <pre id="commit-code"><code>-- no transaction has executed
-SELECT balance_minor FROM accounts;</code></pre>
+          <dl id="commit-summary" class="commit-summary" hidden></dl>
+          <p id="commit-note" class="commit-note">No transfer has settled yet. Balances change only after you sign an exact receipt.</p>
         </section>
 
         <section class="ledger-panel" aria-labelledby="ledger-title">
@@ -199,7 +199,7 @@ SELECT balance_minor FROM accounts;</code></pre>
 
     <footer>
       <span>Localhost only</span>
-      <span>Qwen has no SQL or arbitrary tools</span>
+      <span>The AI drafts only; it cannot move money</span>
       <span id="model-label">Model · checking</span>
     </footer>
   </body>
