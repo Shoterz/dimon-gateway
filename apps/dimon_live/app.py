@@ -315,7 +315,7 @@ def create_app(
             try:
                 manager._assert_origin(
                     request.headers.get("origin"),
-                    request.headers.get("host", "").split(":", 1)[0],
+                    request.headers.get("host", "").lower(),
                 )
             except SessionBoundaryError as exc:
                 raise HTTPException(status_code=exc.status_code, detail=exc.reason_code) from exc

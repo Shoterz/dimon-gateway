@@ -103,6 +103,28 @@ class FixtureSessionUiTests(unittest.TestCase):
 
         self.assertEqual(asyncio.run(send()).status_code, 200)
 
+    def test_configured_localhost_port_serves_the_page_without_origin(self) -> None:
+        from apps.dimon_live.app import create_app
+
+        root = Path(self.temp_dir.name) / "page-boundary"
+        settings = {
+            "DIMON_ALLOWED_ORIGINS": "http://127.0.0.1:18990",
+            "DIMON_DB_OWNER_PATH": str(root / "owner.sqlite3"),
+            "DIMON_VISITOR_DB_DIR": str(root / "visitors"),
+        }
+        with patch.dict(os.environ, settings):
+            app = create_app(providers=build_inference_providers("fixture", {}))
+
+        async def send() -> httpx.Response:
+            transport = httpx.ASGITransport(app=app)
+            async with httpx.AsyncClient(
+                transport=transport,
+                base_url="http://127.0.0.1:18990",
+            ) as client:
+                return await client.get("/")
+
+        self.assertEqual(asyncio.run(send()).status_code, 200)
+
 
 if __name__ == "__main__":
     unittest.main()
