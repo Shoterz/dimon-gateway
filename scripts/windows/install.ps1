@@ -32,7 +32,7 @@ trap {
     if (Get-Command Write-UnexpectedError -ErrorAction SilentlyContinue) { Write-UnexpectedError $_ } else { Write-Host "    [x] $($_.Exception.Message)" -ForegroundColor Red }
     exit 1
 }
-$artifacts = Import-PowerShellDataFile (Join-Path $PSScriptRoot "artifacts.psd1")
+$artifacts = Import-PowerShellDataFile -LiteralPath (Join-Path $PSScriptRoot "artifacts.psd1")
 $installRoot = Get-DimonHome
 
 Write-Host ""
@@ -48,7 +48,7 @@ if ($os.Major -lt 10) {
 }
 $arch = if ($env:PROCESSOR_ARCHITEW6432) { $env:PROCESSOR_ARCHITEW6432 } else { $env:PROCESSOR_ARCHITECTURE }
 $ramGb = [math]::Round((Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory / 1GB)
-New-Item -ItemType Directory -Force -Path $installRoot | Out-Null
+[void][IO.Directory]::CreateDirectory($installRoot)
 $freeGb = [math]::Round((New-Object IO.DriveInfo ([IO.Path]::GetPathRoot($installRoot))).AvailableFreeSpace / 1GB)
 $gpus = @(Get-CimInstance Win32_VideoController | ForEach-Object { $_.Name })
 $hasVulkan = Test-Path -LiteralPath (Join-Path $env:WINDIR "System32\vulkan-1.dll")
@@ -100,7 +100,7 @@ if (-not $uv) {
 Use-UvOnPath $uv
 Write-Ok "uv $((& $uv --version) -replace '^uv ', '')"
 
-Push-Location $DimonRepo
+Push-Location -LiteralPath $DimonRepo
 try {
     Write-Note "Syncing the locked environment (downloads Python 3.12 on first run)..."
     & $uv sync --locked --quiet
@@ -112,7 +112,8 @@ Write-Ok "Application environment ready"
 
 # Files extracted from a downloaded zip carry the "from the internet" mark,
 # which makes Windows prompt on every script; clear it once.
-Get-ChildItem -LiteralPath $DimonRepo -Recurse -File -Include *.ps1, *.cmd, *.psd1 -ErrorAction SilentlyContinue | Unblock-File
+Get-ChildItem -LiteralPath $DimonRepo -Recurse -File -ErrorAction SilentlyContinue |
+    Where-Object { ".ps1", ".cmd", ".psd1" -contains $_.Extension } | Unblock-File
 
 Write-Step "Configuring"
 if (Initialize-DotEnv) { Write-Ok "Created apps\dimon_live\.env from the template" } else { Write-Ok "Keeping your existing apps\dimon_live\.env" }
@@ -131,7 +132,7 @@ if ($Mode -eq "local") {
     } else {
         Write-Note "Installing the Microsoft Visual C++ runtime (Windows will ask for permission)..."
         $redist = Join-Path $installRoot "downloads\vc_redist.x64.exe"
-        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $redist) | Out-Null
+        [void][IO.Directory]::CreateDirectory((Split-Path -Parent $redist))
         Invoke-WebRequest -Uri "https://aka.ms/vs/17/release/vc_redist.x64.exe" -OutFile $redist -UseBasicParsing
         $signature = Get-AuthenticodeSignature -LiteralPath $redist
         if ($signature.Status -ne "Valid" -or $signature.SignerCertificate.Subject -notmatch "Microsoft Corporation") {
@@ -202,7 +203,7 @@ if (-not $NoShortcuts) {
     Write-Step "Adding shortcuts"
     $shell = New-Object -ComObject WScript.Shell
     $startMenu = Join-Path ([Environment]::GetFolderPath("Programs")) "Dimon Gateway"
-    New-Item -ItemType Directory -Force -Path $startMenu | Out-Null
+    [void][IO.Directory]::CreateDirectory($startMenu)
     $links = @(
         @{ Path = (Join-Path ([Environment]::GetFolderPath("Desktop")) "Dimon Gateway.lnk"); Target = "start.cmd"; Description = "Start Dimon Gateway" },
         @{ Path = (Join-Path $startMenu "Dimon Gateway.lnk"); Target = "start.cmd"; Description = "Start Dimon Gateway" },

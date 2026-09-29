@@ -126,7 +126,7 @@ function Get-VerifiedFile([hashtable]$Artifact, [string]$Destination, [string]$L
         Write-Ok "$Label already downloaded and verified"
         return
     }
-    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $Destination) | Out-Null
+    [void][IO.Directory]::CreateDirectory((Split-Path -Parent $Destination))
     $partial = "$Destination.partial"
     Write-Note "Downloading $Label ($(Format-Size $Artifact.Bytes))..."
     $curl = Join-Path $env:WINDIR "System32\curl.exe"
@@ -163,7 +163,9 @@ function Expand-VerifiedZip([hashtable]$Artifact, [string]$InstallRoot, [string]
         return $target
     }
     if (Test-Path -LiteralPath $target) { Remove-Item -LiteralPath $target -Recurse -Force }
-    Expand-Archive -LiteralPath $zip -DestinationPath $target -Force
+    # .NET's extractor is literal about paths and far faster than Expand-Archive on 5.1.
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    [IO.Compression.ZipFile]::ExtractToDirectory($zip, $target)
     Get-ChildItem -LiteralPath $target -Recurse -File | Unblock-File
     Set-Content -LiteralPath $marker -Value $Artifact.Sha256 -Encoding Ascii
     return $target

@@ -37,7 +37,8 @@ Write-Host "  Dimon Gateway" -ForegroundColor White
 $mode = if ($env:DIMON_INFERENCE_MODE) { $env:DIMON_INFERENCE_MODE } else { "fixture" }
 $env:PYTHONUTF8 = "1"
 $env:PYTHONIOENCODING = "utf-8"
-New-Item -ItemType Directory -Force -Path $DimonLogDir, (Split-Path -Parent $DimonStateFile) | Out-Null
+[void][IO.Directory]::CreateDirectory($DimonLogDir)
+[void][IO.Directory]::CreateDirectory((Split-Path -Parent $DimonStateFile))
 
 $services = @()
 if ($mode -eq "local") {
