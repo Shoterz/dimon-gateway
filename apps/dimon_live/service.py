@@ -127,6 +127,57 @@ class ActionService:
         self.paynow_directory = SyntheticPayNowDirectory(database)
 
     def process(self, request_id: str, text: str) -> dict[str, Any]:
+        return self._with_validation(self._process(request_id, text))
+
+    def _with_validation(self, response: dict[str, Any]) -> dict[str, Any]:
+        """Attach the independent validation agent's verdict to every draft.
+
+        A FROZEN verdict means the compiled draft contradicts the user's own
+        words; the gateway refuses to challenge or execute it, and the user is
+        alerted here instead of being shown a signable receipt.
+        """
+
+        audits: list[dict[str, Any]] = []
+        for choice in response.get("receipt_choices") or ():
+            if choice.get("receipt_id"):
+                choice["validation"] = self.database.audit_receipt("single", choice["receipt_id"])
+                audits.append(choice["validation"])
+        batch = response.get("batch_receipt")
+        if batch and batch.get("receipt_id"):
+            batch["validation"] = self.database.audit_receipt("batch", batch["receipt_id"])
+            audits.append(batch["validation"])
+        if not audits:
+            return response
+        verdicts = {audit["verdict"] for audit in audits}
+        stage = (
+            "VALIDATION_PASSED" if verdicts == {"PASS"}
+            else "VALIDATION_FROZEN" if verdicts == {"FROZEN"}
+            else "VALIDATION_ATTENTION"
+        )
+        response = {
+            **response,
+            "trace": [
+                *(response.get("trace") or ()),
+                {"stage": stage, "validator": audits[0]["validator_version"]},
+            ],
+        }
+        if verdicts != {"FROZEN"}:
+            return response
+        return {
+            **response,
+            "outcome": "BLOCKED",
+            "reason_code": "VALIDATION_FROZEN",
+            "discrepancies": [
+                field
+                for audit in audits
+                for field in audit["fields"]
+                if field["verdict"] == "MISMATCH"
+            ],
+            "receipt_choices": [],
+            "batch_receipt": None,
+        }
+
+    def _process(self, request_id: str, text: str) -> dict[str, Any]:
         existing = self.database.get_attempt(request_id)
         if existing is not None:
             if existing["original_text"] != text:
@@ -888,6 +939,20 @@ class ActionService:
         }
 
     def respond_to_clarification(
+        self,
+        clarification_id: str,
+        request_id: str,
+        text: str,
+        *,
+        user_id: str = DEMO_USER_ID,
+    ) -> dict[str, Any]:
+        return self._with_validation(
+            self._respond_to_clarification(
+                clarification_id, request_id, text, user_id=user_id
+            )
+        )
+
+    def _respond_to_clarification(
         self,
         clarification_id: str,
         request_id: str,

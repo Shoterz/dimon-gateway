@@ -164,7 +164,10 @@ class DimonLiveApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         pending = response.json()
         self.assertEqual(pending["outcome"], "CLARIFICATION_REQUEST")
-        self.assertEqual(pending["trace"][-1]["stage"], "SIGNED_APPROVAL_REQUIRED")
+        self.assertEqual(
+            [step["stage"] for step in pending["trace"]][-2:],
+            ["SIGNED_APPROVAL_REQUIRED", "VALIDATION_PASSED"],
+        )
         self.assertEqual(pending["state"]["accounts"][0]["balance_minor"], 100000)
         choice = pending["receipt_choices"][0]
 

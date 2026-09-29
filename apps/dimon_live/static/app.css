@@ -272,6 +272,10 @@ button:focus-visible, textarea:focus-visible, a:focus-visible { outline: 2px sol
 .approval-facts dd { margin: 0; font-weight: 700; text-align: right; }
 .approval-digest { font-family: "Cascadia Mono", Consolas, monospace; font-weight: 400; }
 .approval-note { margin: 0 0 16px; color: var(--muted); font-size: 12px; line-height: 1.5; }
+.approval-validation { margin: 0 0 12px; padding: 8px 10px; border-left: 3px solid var(--line); font-size: 12px; line-height: 1.5; }
+.approval-validation.pass { border-left-color: var(--settled); }
+.approval-validation.attention { border-left-color: var(--amber); background: rgba(241, 202, 116, .06); }
+.approval-validation ul { margin: 4px 0 0; padding-left: 18px; }
 .approval-actions { display: flex; gap: 10px; justify-content: flex-end; }
 .approval-cancel, .approval-confirm { min-height: 44px; padding: 8px 16px; border: 1px solid var(--line); background: transparent; color: var(--paper); font-weight: 700; }
 .approval-confirm {

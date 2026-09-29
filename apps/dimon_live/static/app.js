@@ -46,6 +46,7 @@ const ui = {
   approvalMethod: document.querySelector("#approval-method"),
   approvalConfirm: document.querySelector("#approval-confirm"),
   approvalCancel: document.querySelector("#approval-cancel"),
+  approvalValidation: document.querySelector("#approval-validation"),
 };
 
 let previousBalances = new Map();
@@ -124,6 +125,9 @@ const stageCopy = {
   CLOSE_RECIPIENT_MATCH: ["Close recipient match", "Confirmation required"],
   ACTION_CONFIRMATION_REQUIRED: ["Action confirmation", "No ledger mutation"],
   SIGNED_APPROVAL_REQUIRED: ["Draft only", "Awaiting device signature"],
+  VALIDATION_PASSED: ["Validator agreed", "Every field matches your words"],
+  VALIDATION_ATTENTION: ["Validator flagged", "Some fields need your check"],
+  VALIDATION_FROZEN: ["Validator froze draft", "Contradicts your words"],
   DEVICE_SIGNATURE_VERIFIED: ["Device signature verified", "Bound to this receipt digest"],
   SIGNING_CREDENTIAL_REQUIRED: ["Device not enrolled", "No ledger mutation"],
   APPROVAL_SIGNATURE_INVALID: ["Signature rejected", "Does not verify"],
@@ -335,6 +339,12 @@ function confirmOnDevice(challenge, signerKind) {
   ui.approvalTotal.textContent = formatSgd(review.total_minor);
   ui.approvalDigest.textContent = `${review.receipt_digest.slice(0, 16)}…`;
   ui.approvalMethod.textContent = signer.label;
+  const unverified = (review.validation?.fields || []).filter(field => field.verdict !== "MATCH");
+  ui.approvalValidation.className = unverified.length ? "approval-validation attention" : "approval-validation pass";
+  ui.approvalValidation.innerHTML = unverified.length
+    ? `<strong>Independent validator could not confirm ${unverified.length === 1 ? "this field" : "these fields"} from your words — check before signing:</strong>
+       <ul>${unverified.map(field => `<li>${escapeHtml(field.field.replace(/^items\[\d+\]\./, ""))}: ${escapeHtml(field.draft_value)} — ${escapeHtml(field.note)}</li>`).join("")}</ul>`
+    : "<strong>Independent validator: every field matches your words.</strong>";
   ui.approvalConfirm.textContent = signer.action;
   ui.approvalConfirm.style.setProperty("--hold", "0");
   return new Promise(resolve => {
@@ -570,6 +580,11 @@ function renderResult(result, elapsedMs) {
         await approveReceipt(choice);
       });
     });
+  } else if (result.outcome === "BLOCKED" && result.reason_code === "VALIDATION_FROZEN") {
+    const discrepancies = (result.discrepancies || [])
+      .map(field => `${field.field.replace(/^items\[\d+\]\./, "")}: drafted ${field.draft_value}, you said ${field.observed}`)
+      .join("; ");
+    setOutcome("blocked", "!", "Transaction frozen", "The draft contradicts what you said.", `The independent validator compared the draft with your own words and froze it. ${discrepancies}. Nothing can be signed or executed; please restate the request.`);
   } else if (result.outcome === "BLOCKED") {
     setOutcome("blocked", "!", "Action blocked", result.reason_code.replaceAll("_", " ").toLowerCase(), "Deterministic policy refused the action. Balances are unchanged.");
     if (result.reason_code === "CLARIFICATION_SCOPE_VIOLATION") {

@@ -23,6 +23,7 @@ from .name_resolution import (
     rank_name_candidates,
     rank_phonetic_candidates,
 )
+from .validation_store import VALIDATION_SCHEMA, record_validation
 from .signing_store import (
     SIGNING_SCHEMA,
     consume_approval,
@@ -376,6 +377,7 @@ class Database:
             connection.executescript(V2_SCHEMA)
             connection.executescript(BATCH_SCHEMA)
             connection.executescript(SIGNING_SCHEMA)
+            connection.executescript(VALIDATION_SCHEMA)
             self._apply_v2_migrations(connection)
             count = connection.execute("SELECT COUNT(*) FROM accounts").fetchone()[0]
             if count == 0:
@@ -508,6 +510,7 @@ class Database:
                 # challenges and signatures belong to the receipts removed here.
                 connection.execute("DELETE FROM approval_signatures")
                 connection.execute("DELETE FROM approval_challenges")
+                connection.execute("DELETE FROM validation_records")
                 connection.execute("DELETE FROM batch_ledger_entries")
                 connection.execute("DELETE FROM batch_receipt_executions")
                 connection.execute("DELETE FROM batch_ledger_transactions")
@@ -1024,6 +1027,15 @@ class Database:
                     raise ReceiptRejected(
                         "BATCH_RECEIPT_EXPIRED", persist_status=True
                     )
+                validation = record_validation(
+                    connection,
+                    kind="batch",
+                    receipt_id=receipt_id,
+                    stage="EXECUTION",
+                    now=approved_at,
+                )
+                if validation.verdict == "FROZEN":
+                    raise ReceiptRejected("VALIDATION_FROZEN", persist_status=True)
                 source = connection.execute(
                     """
                     SELECT account_id, label, balance_minor, currency
@@ -1919,6 +1931,23 @@ class Database:
             connection.commit()
             return result
 
+    def audit_receipt(
+        self, kind: str, receipt_id: str, *, now: datetime | None = None
+    ) -> dict[str, Any]:
+        """Run the independent validation agent over a freshly drafted receipt."""
+
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            report = record_validation(
+                connection,
+                kind=kind,
+                receipt_id=receipt_id,
+                stage="DRAFT",
+                now=now or self._clock(),
+            )
+            connection.commit()
+            return report.to_dict()
+
     def signing_credentials(self, rp_id: str, user_id: str = DEMO_USER_ID) -> list[dict]:
         with self._connect() as connection:
             return list_credentials(connection, user_id, rp_id)
@@ -1964,6 +1993,12 @@ class Database:
                     row["expires_at"]
                 ).astimezone(timezone.utc):
                     raise ReceiptRejected("RECEIPT_EXPIRED")
+                validation = record_validation(
+                    connection, kind=kind, receipt_id=receipt_id, stage="CHALLENGE", now=issued_at
+                )
+                if validation.verdict == "FROZEN":
+                    connection.commit()  # keep the audit record of the freeze
+                    raise ReceiptRejected("VALIDATION_FROZEN")
                 credentials = list_credentials(connection, user_id, rp_id)
                 if not credentials:
                     raise ReceiptRejected("SIGNING_CREDENTIAL_REQUIRED")
@@ -2022,6 +2057,7 @@ class Database:
                 "total_minor": total_minor,
                 "items": items,
                 "receipt_expires_at": row["expires_at"],
+                "validation": validation.to_dict(),
             },
         }
 
@@ -2175,6 +2211,14 @@ class Database:
                 (row["receipt_id"],),
             )
             raise ReceiptRejected("RECEIPT_EXPIRED", persist_status=True)
+
+        # Second engine: re-audit the receipt as stored against the user's
+        # own words inside the executing transaction.
+        validation = record_validation(
+            connection, kind="single", receipt_id=row["receipt_id"], stage="EXECUTION", now=now
+        )
+        if validation.verdict == "FROZEN":
+            raise ReceiptRejected("VALIDATION_FROZEN", persist_status=True)
 
         source = connection.execute(
             """
