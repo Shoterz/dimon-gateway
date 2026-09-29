@@ -88,7 +88,8 @@ def main() -> None:
     parser.add_argument("--config", required=True)
     parser.add_argument("--voice", required=True)
     parser.add_argument("--host", choices=("127.0.0.1",), required=True)
-    parser.add_argument("--port", type=int, choices=(3001,), required=True)
+    # Loopback-only is the boundary; the port may move off a busy default.
+    parser.add_argument("--port", type=int, choices=range(1024, 65536), metavar="PORT", required=True)
     args = parser.parse_args()
     engine = KokoroEngine(KokoroPaths(args.model, args.config, args.voice))
     import uvicorn

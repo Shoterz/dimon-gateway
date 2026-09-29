@@ -72,6 +72,18 @@ The Windows launchers read `apps\dimon_live\.env`; explicit shell variables
 still win. Use `dimon-serve`, not `dimon-dev`, for local mode: `dimon-dev`
 forces fixture inference unless the shell sets `DIMON_INFERENCE_MODE`.
 
+## Security model
+
+The model only drafts. Every ledger movement requires a device signature
+(Windows Hello via WebAuthn on `localhost`, or a labelled mock-biometric key)
+over a one-time challenge bound to the exact receipt digest. An independent
+validator freezes drafts that contradict the user's words, a deterministic
+firewall blocks prompt injection before the model runs, KYC/limit/velocity
+policy and an out-of-band token gate high-value transfers, and every step
+lands in a hash-chained audit trail. See
+[DCTA security controls](docs/security-controls.md) for the full
+requirement map, tests, and a live walkthrough.
+
 ## Model boundary
 
 The Git repository contains integration code, launch definitions, manifests,
