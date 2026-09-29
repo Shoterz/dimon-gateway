@@ -38,6 +38,7 @@ _LOCAL_DEFAULTS = {
     "DIMON_NEMOTRON_URL": "ws://127.0.0.1:8004/v1/realtime",
     "DIMON_KOKORO_URL": "http://127.0.0.1:3001",
     "DIMON_WHISPER_URL": "ws://127.0.0.1:8005/v1/stream",
+    "DIMON_WHISPER_CPP_URL": "ws://127.0.0.1:8006/v1/stream",
 }
 
 
@@ -104,10 +105,10 @@ def build_inference_providers(
         )
 
     stt_backend = env.get("DIMON_STT_BACKEND", "nemotron").strip().lower() or "nemotron"
-    if stt_backend not in {"nemotron", "whisper_intel"}:
+    if stt_backend not in {"nemotron", "whisper_intel", "whisper_cpp"}:
         raise ProviderConfigurationError(
             "INVALID_LOCAL_INFERENCE_CONFIG",
-            "DIMON_STT_BACKEND must be nemotron or whisper_intel",
+            "DIMON_STT_BACKEND must be nemotron, whisper_intel, or whisper_cpp",
         )
 
     try:
@@ -116,6 +117,8 @@ def build_inference_providers(
         kokoro_url = _endpoint(env, "DIMON_KOKORO_URL", {"http", "https"})
         if stt_backend == "whisper_intel":
             whisper_url = _endpoint(env, "DIMON_WHISPER_URL", {"ws", "wss"})
+        elif stt_backend == "whisper_cpp":
+            whisper_url = _endpoint(env, "DIMON_WHISPER_CPP_URL", {"ws", "wss"})
         else:
             nemotron_url = _endpoint(env, "DIMON_NEMOTRON_URL", {"ws", "wss"})
             connect_timeout = float(env.get("DIMON_NEMOTRON_CONNECT_TIMEOUT", "3"))
@@ -140,7 +143,7 @@ def build_inference_providers(
             "local inference settings are invalid",
         ) from exc
 
-    if stt_backend == "whisper_intel":
+    if stt_backend in {"whisper_intel", "whisper_cpp"}:
         recognizer = WhisperClient(whisper_url)
         voice_lifecycle = None
     else:

@@ -77,6 +77,16 @@ class InferenceModeTests(unittest.TestCase):
         self.assertEqual(providers.recognizer.url, "ws://127.0.0.1:8005/v1/stream")
         self.assertIsNone(providers.voice_lifecycle)
 
+    def test_local_factory_builds_whisper_cpp_backend_when_selected(self) -> None:
+        providers = build_inference_providers(
+            "local",
+            {"DIMON_STT_BACKEND": "whisper_cpp"},
+        )
+
+        self.assertEqual(providers.mode, "local")
+        self.assertEqual(providers.recognizer.url, "ws://127.0.0.1:8006/v1/stream")
+        self.assertIsNone(providers.voice_lifecycle)
+
     def test_local_factory_rejects_an_unknown_stt_backend(self) -> None:
         with self.assertRaises(ProviderConfigurationError) as raised:
             build_inference_providers("local", {"DIMON_STT_BACKEND": "openai"})
