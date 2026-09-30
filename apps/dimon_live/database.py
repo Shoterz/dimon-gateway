@@ -24,13 +24,14 @@ from .name_resolution import (
     rank_name_candidates,
     rank_phonetic_candidates,
 )
-from . import audit_log, kyc
+from . import audit_log, investing, kyc
 from .face_id import FaceRejected, FaceStore, default_engine, face_database_path
 from .approval_gateway import approval_challenge, b64url_encode, verify_signature
 from .audit_log import AUDIT_SCHEMA
 from .risk_policy import (
     POLICY_SCHEMA,
     PolicyRejected,
+    check_kyc,
     evaluate as evaluate_policy,
     mock_token_code,
     seed_profile,
@@ -415,6 +416,7 @@ class Database:
             connection.executescript(AUDIT_SCHEMA)
             connection.executescript(PAYEE_SCHEMA)
             connection.executescript(REQUESTS_SCHEMA)
+            connection.executescript(investing.INVESTING_SCHEMA)
             seed_profile(connection, DEMO_USER_ID, self._clock(), kyc_status="PENDING")
             kyc.migrate(connection)
             self._apply_v2_migrations(connection)
@@ -571,6 +573,9 @@ class Database:
                 connection.execute("DELETE FROM review_receipts")
                 connection.execute("DELETE FROM action_attempts")
                 connection.execute("DELETE FROM money_requests")
+                for table in ("investment_cash_entries", "trades", "holdings", "plan_runs",
+                              "investment_plans", "investment_orders"):
+                    connection.execute(f"DELETE FROM {table}")
                 connection.execute("DELETE FROM beneficiary_aliases")
                 connection.execute("DELETE FROM prior_payments")
                 connection.execute("DELETE FROM payee_registrations")
@@ -2194,7 +2199,19 @@ class Database:
                     (user_id,),
                 )
             ]
-            shown = []
+            shown = [
+                {
+                    "receipt_id": row["order_id"],
+                    "payee": investing.order_title(row),
+                    "total_minor": row["total_minor"],
+                    "code": mock_token_code(connection, user_id, row["order_id"], row["order_digest"]),
+                }
+                for row in connection.execute(
+                    "SELECT * FROM investment_orders WHERE user_id = ? AND status = 'AWAITING_CONFIRMATION' AND expires_at > ?",
+                    (user_id, current.isoformat()),
+                )
+                if row["total_minor"] > investing.TOKEN_ABOVE_MINOR
+            ]
             for kind, row in rows:
                 if datetime.fromisoformat(row["expires_at"]) <= current:
                     continue
@@ -2442,6 +2459,165 @@ class Database:
             )
             connection.commit()
             return money_request_id
+
+    # ------------------------------------------------------------ investing
+    def investing_overview(self, user_id: str = DEMO_USER_ID, *, now: datetime | None = None) -> dict[str, Any]:
+        now = now or self._clock()
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            runs = investing.run_due_plans(connection, user_id, now)
+            overview = investing.portfolio(connection, user_id, now)
+            connection.commit()
+        return {**overview, "plan_runs": runs}
+
+    def investor_profile(self, user_id: str = DEMO_USER_ID) -> dict[str, Any] | None:
+        with self._connect() as connection:
+            return investing.profile(connection, user_id)
+
+    def save_investor_profile(
+        self, answers: dict[str, int], acknowledged: bool, user_id: str = DEMO_USER_ID
+    ) -> dict[str, Any]:
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            saved = investing.save_profile(connection, user_id, answers, acknowledged, self._clock())
+            connection.commit()
+            return saved
+
+    def draft_investment_order(
+        self, request_id: str, text: str, intent: Any, user_id: str = DEMO_USER_ID
+    ) -> dict[str, Any]:
+        now = self._clock()
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            order = investing.draft_order(
+                connection, user_id=user_id, request_id=request_id, text=text, intent=intent, now=now
+            )
+            connection.commit()
+            return order
+
+    def cancel_investment_plan(self, plan_id: str, user_id: str = DEMO_USER_ID) -> None:
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            investing.cancel_plan(connection, user_id, plan_id, self._clock())
+            connection.commit()
+
+    def _awaiting_order(self, connection: sqlite3.Connection, order_id: str, digest: str, user_id: str, now: datetime):
+        row = connection.execute("SELECT * FROM investment_orders WHERE order_id = ?", (order_id,)).fetchone()
+        if row is None:
+            raise ReceiptRejected("RECEIPT_NOT_FOUND")
+        if row["user_id"] != user_id:
+            raise ReceiptRejected("RECEIPT_USER_MISMATCH")
+        if row["order_digest"] != digest:
+            raise ReceiptRejected("RECEIPT_DIGEST_MISMATCH")
+        if row["status"] == "EXECUTED":
+            raise ReceiptRejected("RECEIPT_ALREADY_EXECUTED")
+        if row["status"] != "AWAITING_CONFIRMATION":
+            raise ReceiptRejected(f"ORDER_{row['status']}")
+        if now.astimezone(timezone.utc) >= datetime.fromisoformat(row["expires_at"]):
+            connection.execute("UPDATE investment_orders SET status = 'EXPIRED' WHERE order_id = ?", (order_id,))
+            raise ReceiptRejected("RECEIPT_EXPIRED", persist_status=True)
+        return row
+
+    def issue_order_challenge(
+        self, order_id: str, order_digest: str, *, rp_id: str, user_id: str = DEMO_USER_ID,
+        now: datetime | None = None,
+    ) -> dict[str, Any]:
+        """A one-time challenge bound to an awaiting investment order."""
+
+        now = now or self._clock()
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                row = self._awaiting_order(connection, order_id, order_digest, user_id, now)
+                credentials = list_credentials(connection, user_id, rp_id)
+                if not credentials:
+                    raise ReceiptRejected("SIGNING_CREDENTIAL_REQUIRED")
+                review = investing.order_review(connection, row, now)
+                challenge = issue_challenge(
+                    connection, purpose="APPROVE_RECEIPT", user_id=user_id, now=now,
+                    receipt_id=order_id, receipt_digest=order_digest,
+                )
+                connection.commit()
+            except ReceiptRejected as exc:
+                if exc.persist_status:
+                    connection.commit()
+                else:
+                    connection.rollback()
+                raise
+        return {**challenge, "allow_credentials": credentials, "review": review}
+
+    def approve_order(
+        self,
+        order_id: str,
+        order_digest: str,
+        user_id: str = DEMO_USER_ID,
+        *,
+        assertion: DeviceAssertion | None,
+        context: ApprovalContext | None,
+        out_of_band_code: str | None = None,
+        read_back_played: bool = False,
+        risk_acknowledged: bool = False,
+        now: datetime | None = None,
+    ) -> dict[str, Any]:
+        """Execute a signed order: KYC, read-back, token, risk acknowledgement,
+        the registered face and the device signature are all checked here,
+        inside the transaction that fills it."""
+
+        now = now or self._clock()
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                row = self._awaiting_order(connection, order_id, order_digest, user_id, now)
+                try:
+                    check_kyc(connection, user_id, now)
+                    if row["total_minor"] > investing.TOKEN_ABOVE_MINOR:
+                        verify_out_of_band(connection, user_id=user_id, receipt_id=order_id,
+                                           receipt_digest=order_digest, code=out_of_band_code)
+                except PolicyRejected as exc:
+                    raise ReceiptRejected(exc.reason_code, persist_status=True) from None
+                if row["total_minor"] >= investing.READ_BACK_MINOR and not read_back_played:
+                    raise ReceiptRejected("READ_BACK_REQUIRED")
+                if row["risk_ack_required"] and not risk_acknowledged:
+                    raise ReceiptRejected("RISK_ACKNOWLEDGEMENT_REQUIRED")
+                approval = self._require_device_signature(
+                    connection, assertion, context, purpose="APPROVE_RECEIPT", receipt_id=order_id,
+                    receipt_digest=order_digest, user_id=user_id, executed=False, now=now,
+                )
+                try:
+                    result = investing.execute_order(connection, row, now)
+                except investing.InvestRejected as exc:
+                    connection.execute(
+                        "UPDATE investment_orders SET status = 'REJECTED', reason_code = ? WHERE order_id = ?",
+                        (exc.reason_code, order_id),
+                    )
+                    raise ReceiptRejected(exc.reason_code, persist_status=True) from None
+                connection.execute(
+                    "UPDATE investment_orders SET status = 'EXECUTED', executed_at = ? WHERE order_id = ?",
+                    (now.astimezone(timezone.utc).isoformat(), order_id),
+                )
+                connection.commit()
+            except ReceiptRejected as exc:
+                if exc.persist_status:
+                    connection.commit()
+                else:
+                    connection.rollback()
+                raise
+        return {
+            "outcome": "EXECUTED_INVESTMENT_PLAN" if row["kind"] == "PLAN" else "EXECUTED_SYNTHETIC_TRADE",
+            "order_id": order_id,
+            "order_kind": row["kind"],
+            "title": investing.order_title(row),
+            "approval": approval,
+            **result,
+            "trace": [
+                {"stage": "ORDER_APPROVAL_RECEIVED"},
+                {"stage": "FACE_MATCH_VERIFIED"},
+                {"stage": "DEVICE_SIGNATURE_VERIFIED"},
+                {"stage": "ORDER_FILLED" if row["kind"] != "PLAN" else "PLAN_STARTED"},
+            ],
+            "state": self.get_state(),
+            "portfolio": self.investing_overview(user_id),
+        }
 
     def start_myinfo(self, user_id: str = DEMO_USER_ID, *, now: datetime | None = None) -> dict[str, Any]:
         with self._connect() as connection:

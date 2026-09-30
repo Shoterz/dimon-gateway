@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timezone
 import base64
 import binascii
 import os
@@ -13,7 +14,7 @@ from urllib.parse import urlparse
 from uuid import UUID, uuid4
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Request, WebSocket
+from fastapi import FastAPI, HTTPException, Query, Request, WebSocket
 from fastapi.responses import HTMLResponse, Response
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -25,6 +26,7 @@ from .approval_gateway import (
 )
 from .database import Database, ReceiptRejected
 from .face_id import MAX_FRAMES, MIN_FRAMES, FaceRejected
+from . import investing, market
 from .payees import PayeeSaveRejected
 from .read_back import build_read_back
 from .tencent_tts import read_back_synthesizer_from_env
@@ -113,6 +115,22 @@ class KycCompletionRequest(CredentialRegistrationRequest):
 # in memory and discarded; only their hashes are kept.
 FaceFrame = Annotated[str, Field(min_length=64, max_length=560_000, pattern=r"^[A-Za-z0-9+/=_-]+$")]
 FaceFrames = Annotated[list[FaceFrame], Field(min_length=MIN_FRAMES, max_length=MAX_FRAMES)]
+
+
+class InvestorAnswers(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    horizon: Annotated[int, Field(ge=1, le=4)]
+    drop: Annotated[int, Field(ge=1, le=4)]
+    experience: Annotated[int, Field(ge=1, le=4)]
+    goal: Annotated[int, Field(ge=1, le=4)]
+
+
+class InvestorProfileRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    answers: InvestorAnswers
+    acknowledged: bool
 
 
 class FaceRegistrationRequest(BaseModel):
@@ -410,6 +428,88 @@ def create_app(
         context = resolve(request, response)
         return context.database.start_myinfo()
 
+    @application.get("/api/invest")
+    async def invest_overview(request: Request, response: Response):
+        context = resolve(request, response)
+        return await asyncio.to_thread(context.database.investing_overview)
+
+    @application.post("/api/invest/profile")
+    async def invest_profile(request: Request, response: Response, body: InvestorProfileRequest):
+        context = resolve(request, response)
+        try:
+            return context.database.save_investor_profile(body.answers.model_dump(), body.acknowledged)
+        except investing.InvestRejected as exc:
+            raise HTTPException(status_code=400, detail=exc.reason_code) from exc
+
+    @application.get("/api/invest/trending")
+    async def invest_trending(request: Request, response: Response):
+        context = resolve(request, response)
+        investor = context.database.investor_profile()
+        return investing.trending(datetime.now(timezone.utc), investor["risk_score"] if investor else None)
+
+    @application.get("/api/invest/plans")
+    async def invest_plans(
+        request: Request, response: Response,
+        monthly: Annotated[int | None, Query(ge=5_000, le=1_000_000)] = None,
+        years: Annotated[int | None, Query(ge=1, le=40)] = None,
+    ):
+        context = resolve(request, response)
+        investor = context.database.investor_profile()
+        return investing.plan_suggestions(
+            investor["risk_score"] if investor else None,
+            investor["horizon_years"] if investor else None, monthly, years,
+        )
+
+    @application.get("/api/invest/instruments/{symbol}")
+    async def invest_instrument(request: Request, response: Response, symbol: str):
+        resolve(request, response)
+        if symbol not in market.BY_SYMBOL:
+            raise HTTPException(status_code=404, detail="INSTRUMENT_NOT_FOUND")
+        now = datetime.now(timezone.utc)
+        return {**market.snapshot(symbol, now), "history": market.history(symbol, now), "disclaimer": market.DISCLAIMER}
+
+    @application.post("/api/invest/plans/{plan_id}/cancel")
+    async def invest_cancel_plan(request: Request, response: Response, plan_id: str):
+        context = resolve(request, response)
+        try:
+            context.database.cancel_investment_plan(plan_id)
+        except investing.InvestRejected as exc:
+            raise HTTPException(status_code=404, detail=exc.reason_code) from exc
+        return await asyncio.to_thread(context.database.investing_overview)
+
+    @application.post("/api/orders/{order_id}/challenge")
+    async def order_challenge(request: Request, response: Response, order_id: str, body: ReceiptChallengeRequest):
+        context = resolve(request, response)
+        try:
+            challenge = context.database.issue_order_challenge(
+                order_id, body.receipt_digest, rp_id=approval_context(request).rp_id
+            )
+        except ReceiptRejected as exc:
+            return blocked(exc.reason_code, context)
+        queue_text = getattr(application.state.speech_service, "queue_text", None)
+        text = challenge["review"]["read_back"]["text"]
+        challenge["review"]["read_back"]["audio_artifact_id"] = queue_text(text, context) if callable(queue_text) else None
+        return challenge
+
+    @application.post("/api/orders/{order_id}/approve")
+    async def approve_order(request: Request, response: Response, order_id: str, approval: ReceiptApprovalRequest):
+        context = resolve(request, response)
+        try:
+            assertion = device_assertion(approval)
+        except ApprovalRejected as exc:
+            return blocked(exc.reason_code, context)
+        result = await asyncio.to_thread(
+            service_for(context).approve_order,
+            order_id,
+            approval.receipt_digest,
+            assertion=assertion,
+            context=approval_context(request),
+            out_of_band_code=approval.out_of_band_code,
+            read_back_played=approval.read_back_played,
+            risk_acknowledged=approval.unusual_amount_confirmed,
+        )
+        return await attach_speech(result, context)
+
     @application.get("/api/face")
     async def face_status(request: Request, response: Response):
         context = resolve(request, response)
@@ -703,6 +803,14 @@ def create_app(
         return Response(
             (STATIC_DIR / "receipt_approval.mjs").read_text(encoding="utf-8"),
             media_type="application/javascript",
+        )
+
+    @application.get("/static/invest_ui.mjs", include_in_schema=False)
+    async def invest_ui_script():
+        return Response(
+            (STATIC_DIR / "invest_ui.mjs").read_text(encoding="utf-8"),
+            media_type="application/javascript",
+            headers={"Cache-Control": "no-store"},
         )
 
     @application.get("/static/face_capture.mjs", include_in_schema=False)

@@ -285,6 +285,62 @@ button:focus-visible, textarea:focus-visible, a:focus-visible { outline: 2px sol
 .approval-validation.pass { border-left-color: var(--settled); }
 .approval-validation.attention { border-left-color: var(--amber); background: rgba(241, 202, 116, .06); }
 .approval-validation ul { margin: 4px 0 0; padding-left: 18px; }
+.invest-board { display: grid; gap: 10px; }
+.invest-holdings { display: grid; gap: 6px; }
+.holding-row { display: flex; justify-content: space-between; gap: 12px; padding: 10px 12px; border: 1px solid var(--line); background: var(--mineral); }
+.holding-row span { display: grid; gap: 2px; min-width: 0; }
+.holding-row small { opacity: .7; font-size: 12px; }
+.holding-value { text-align: right; justify-items: end; }
+.plan-row { border-style: dashed; }
+.invest-empty, .invest-profile, .invest-note { margin: 0; font-size: 13px; opacity: .8; }
+.invest-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.invest-action { padding: 8px 12px; border: 1px solid var(--line); border-radius: 999px; background: transparent; color: inherit; font: inherit; font-size: 13px; cursor: pointer; }
+.invest-action:hover { border-color: var(--signal); }
+.invest-disclaimer { margin: 6px 0 0; font-size: 11.5px; opacity: .6; line-height: 1.4; }
+.gain { color: var(--signal); }
+.loss { color: #ff8f8f; }
+.invest-card { display: grid; gap: 10px; padding: 13px; margin-bottom: 10px; border: 1px solid var(--line); background: rgba(10, 14, 16, .4); }
+.invest-card header { display: flex; justify-content: space-between; gap: 12px; }
+.invest-card header div { display: grid; gap: 3px; }
+.invest-card header small { opacity: .7; font-size: 12px; }
+.invest-price { text-align: right; }
+.invest-why { margin: 0; font-size: 13px; }
+.invest-stats { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 6px; margin: 0; }
+.invest-stats div { display: grid; gap: 2px; }
+.invest-stats dt { font-size: 11px; opacity: .6; }
+.invest-stats dd { margin: 0; font-size: 13px; }
+.invest-points { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; font-size: 12.5px; }
+.invest-points ul { margin: 4px 0 0; padding-left: 16px; }
+.points-label { margin: 0; font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: var(--signal); }
+.points-label.risks { color: #ffb86b; }
+.invest-fit { margin: 0; font-size: 12.5px; }
+.invest-fit.above { color: #ffb86b; }
+.invest-card-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.plan-card.best { border-color: var(--signal); }
+.payee-flag.warn { color: #ffb86b; }
+.alloc-bar { display: flex; height: 18px; overflow: hidden; border: 1px solid var(--line); font-size: 10.5px; }
+.alloc-bar span { display: grid; place-items: center; min-width: 0; overflow: hidden; background: rgba(120, 224, 207, .18); border-right: 1px solid rgba(0, 0, 0, .4); }
+.alloc-bar span:nth-child(2n) { background: rgba(120, 224, 207, .32); }
+.alloc-list { margin: 0; padding-left: 16px; font-size: 12.5px; }
+.projection { margin: 0; font-size: 13px; line-height: 1.45; }
+.plan-inputs { display: flex; flex-wrap: wrap; gap: 10px; align-items: end; margin-bottom: 10px; font-size: 13px; }
+.plan-inputs label { display: grid; gap: 4px; }
+.plan-inputs input { width: 110px; padding: 6px 8px; border: 1px solid var(--line); background: rgba(0, 0, 0, .25); color: inherit; font: inherit; }
+.portfolio-summary { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin-bottom: 8px; }
+.portfolio-summary span { display: grid; gap: 2px; padding: 10px; border: 1px solid var(--line); }
+.portfolio-summary small { opacity: .7; font-size: 12px; }
+.spark { width: 100%; height: 56px; }
+.spark polyline { fill: none; stroke-width: 1.6; }
+.spark.up polyline { stroke: var(--signal); }
+.spark.down polyline { stroke: #ff8f8f; }
+.spark-label { font-size: 11px; opacity: .6; }
+.profile-questions { display: grid; gap: 12px; margin: 10px 0; }
+.profile-questions fieldset { display: grid; gap: 4px; margin: 0; padding: 8px 10px; border: 1px solid var(--line); font-size: 13px; }
+.profile-questions legend { padding: 0 4px; font-weight: 600; }
+@media (max-width: 640px) {
+  .invest-stats { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .invest-points, .portfolio-summary { grid-template-columns: 1fr; }
+}
 .face-panel { display: grid; gap: 8px; margin: 0 0 12px; padding: 10px; border: 1px solid rgba(120, 224, 207, .35); }
 .face-video { width: 100%; max-height: 220px; aspect-ratio: 4 / 3; object-fit: cover; background: #05080a; transform: scaleX(-1); border: 1px solid var(--line); }
 .face-prompt { margin: 0; font-size: 13px; line-height: 1.4; }

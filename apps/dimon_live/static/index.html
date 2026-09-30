@@ -43,6 +43,22 @@
           </div>
         </section>
 
+        <section id="invest-board" class="invest-board" aria-labelledby="invest-title">
+          <div class="section-heading">
+            <h2 id="invest-title">Investments</h2>
+            <span id="invest-total">—</span>
+          </div>
+          <div id="invest-holdings" class="invest-holdings"></div>
+          <p id="invest-profile" class="invest-profile"></p>
+          <div class="invest-actions">
+            <button type="button" class="invest-action" data-say="What's trending?">What's trending</button>
+            <button type="button" class="invest-action" data-say="Suggest a long-term plan">Long-term plans</button>
+            <button type="button" class="invest-action" data-say="Show my portfolio">My portfolio</button>
+            <button type="button" id="invest-profile-button" class="invest-action">Risk profile</button>
+          </div>
+          <p class="invest-disclaimer">Simulated market with fictional companies and funds. Suggestions are rule-based, not financial advice.</p>
+        </section>
+
         <form id="command-form" class="command-form">
           <label id="command-label" for="command-input">What should the ledger do?</label>
           <div class="command-box">
@@ -192,6 +208,22 @@
       <div class="approval-actions">
         <button id="kyc-cancel" type="button" class="approval-cancel">Not now</button>
         <button id="kyc-next" type="button" class="approval-confirm">Retrieve Myinfo with Singpass</button>
+      </div>
+    </dialog>
+
+    <dialog id="profile-dialog" class="approval-dialog profile-dialog" aria-labelledby="profile-title">
+      <p class="approval-kicker">Investor profile · needed before your first investment</p>
+      <h2 id="profile-title">Your goals and comfort with risk</h2>
+      <p class="approval-note">Four questions decide which investments and plans suit you. You can retake them any time.</p>
+      <form id="profile-questions" class="profile-questions" onsubmit="return false"></form>
+      <label class="approval-unusual">
+        <input id="profile-ack" type="checkbox">
+        <span>I understand investments can fall as well as rise, and I could get back less than I put in.</span>
+      </label>
+      <p id="profile-status" class="approval-note" role="status"></p>
+      <div class="approval-actions">
+        <button id="profile-cancel" type="button" class="approval-cancel">Not now</button>
+        <button id="profile-save" type="button" class="approval-confirm">Save profile</button>
       </div>
     </dialog>
 

@@ -6,7 +6,7 @@ import re
 import sqlite3
 from typing import Any
 
-from . import input_firewall, no_approval, scam_guard
+from . import input_firewall, investing, market, no_approval, scam_guard
 from .approval_gateway import ApprovalContext, DeviceAssertion
 from .batch_grounding import bind_batch_evidence
 from .batch_receipts import BatchReceiptDraft, BatchReceiptItemDraft
@@ -327,6 +327,12 @@ class ActionService:
                 trace,
                 extra={"scam": scam.to_dict(), "warning": scam_guard.WARNING},
             )
+        try:
+            invest_intent = investing.understand(text)
+        except investing.InvestRejected as exc:
+            return self._nonexecuting(request_id, text, "BLOCKED", exc.reason_code, trace)
+        if invest_intent is not None:
+            return self._investing(request_id, text, trace, invest_intent)
         if no_approval.is_balance_inquiry(text) or no_approval.looks_like_money_request(text):
             return self._answer_without_approval(request_id, text, trace)
         try:
@@ -1442,6 +1448,99 @@ class ActionService:
                 extracted=extracted,
                 detail=str(exc),
             )
+
+    _INVEST_QUESTIONS = {
+        "MISSING_QUANTITY": "How many units, or how much in dollars? For example: buy 20 shares, or buy S$500 of it.",
+        "MISSING_MONTHLY_AMOUNT": "How much a month? For example: S$300 a month.",
+        "PLAN_NOT_CHOSEN": "Which plan or fund should the monthly amount go into?",
+        "NOT_HELD": "You don't hold that investment.",
+        "SELL_MORE_THAN_HELD": "That's more than you hold.",
+        "AMOUNT_BELOW_ONE_UNIT": "That amount is less than the price of one unit.",
+        "PLAN_AMOUNT_OUT_OF_RANGE": "Monthly plans run from S$50 to S$2,000 a month.",
+        "ORDER_LIMIT_EXCEEDED": "A single order can be up to S$5,000.",
+        "DAILY_TRADING_LIMIT_EXCEEDED": "That would pass the S$10,000 daily trading limit.",
+        "INSUFFICIENT_FUNDS": "There isn't enough in savings for this order.",
+        "ONE_INSTRUMENT_PER_ORDER": "Please name one investment per order.",
+        "AMBIGUOUS_AMOUNT": "Please say one amount.",
+    }
+
+    def _investing(
+        self, request_id: str, text: str, trace: list[dict[str, Any]], intent: investing.InvestIntent
+    ) -> dict[str, Any]:
+        """Portfolio, suggestions and quotes are answered at once; orders and
+        plans become signed receipts. The model is not used for either."""
+
+        trace.append({"stage": "INVESTMENT_REQUEST_UNDERSTOOD", "kind": intent.kind})
+        now = self.database._clock()
+        investor = self.database.investor_profile()
+        risk = investor["risk_score"] if investor else None
+        if intent.kind == "PORTFOLIO":
+            overview = self.database.investing_overview()
+            answer = (
+                f"Your investments are worth {investing.money(overview['total_value_minor'])} "
+                f"({'up' if overview['total_gain_minor'] >= 0 else 'down'} {investing.money(abs(overview['total_gain_minor']))} "
+                f"on what you paid), with {len(overview['plans']) or 'no'} monthly plan{'' if len(overview['plans']) == 1 else 's'} running."
+                if overview["holdings"] else "You don't hold any investments yet. Ask what's trending, or for long-term plans."
+            )
+            return self._nonexecuting(request_id, text, "ANSWERED", "INVESTMENT_PORTFOLIO", trace,
+                                      extra={"answer": answer, "investing": {"view": "PORTFOLIO", **overview}})
+        if intent.kind == "TRENDING":
+            picks = investing.trending(now, risk)
+            names = ", ".join(f"{p['name']} (up {p['change_1m_pct']:.1f}% this month)" for p in picks["trending"][:3])
+            answer = f"Trending now: {names}." if names else "Nothing is trending upwards right now."
+            return self._nonexecuting(request_id, text, "ANSWERED", "INVESTMENT_TRENDING", trace,
+                                      extra={"answer": answer, "investing": {"view": "TRENDING", "profile": investor, **picks}})
+        if intent.kind == "PLANS":
+            plans = investing.plan_suggestions(risk, investor["horizon_years"] if investor else None,
+                                               intent.amount_minor, intent.years)
+            best = next(p for p in plans["plans"] if p["best_fit"])
+            answer = (
+                f"Best fit{' for your profile' if investor else ''}: {best['name']}. "
+                f"{investing.money(best['monthly_minor'])} a month for {best['years']} years "
+                f"({investing.money(best['contributed_minor'])} paid in) could grow to about "
+                f"{investing.money(best['projection_minor']['middle'])}, within a range of "
+                f"{investing.money(best['projection_minor']['cautious'])} to {investing.money(best['projection_minor']['strong'])}."
+            )
+            return self._nonexecuting(request_id, text, "ANSWERED", "INVESTMENT_PLANS", trace,
+                                      extra={"answer": answer, "investing": {"view": "PLANS", "profile": investor, **plans}})
+        if intent.kind == "QUOTE":
+            snap = market.snapshot(intent.instrument.symbol, now)
+            answer = (f"{snap['name']} ({snap['symbol']}): {investing.money(snap['price_minor'])}, "
+                      f"{'up' if snap['change_1d_pct'] >= 0 else 'down'} {abs(snap['change_1d_pct']):.2f}% today, "
+                      f"{snap['change_1y_pct']:+.1f}% over a year.")
+            return self._nonexecuting(request_id, text, "ANSWERED", "INVESTMENT_QUOTE", trace,
+                                      extra={"answer": answer, "investing": {"view": "QUOTE", "instrument": snap,
+                                             "history": market.history(snap["symbol"], now), "profile": investor,
+                                             "disclaimer": market.DISCLAIMER}})
+        try:
+            order = self.database.draft_investment_order(request_id, text, intent)
+        except investing.InvestRejected as exc:
+            if exc.reason_code == "INVESTOR_PROFILE_REQUIRED":
+                return self._nonexecuting(
+                    request_id, text, "CLARIFICATION_REQUEST", "INVESTOR_PROFILE_REQUIRED", trace,
+                    extra={"question": "Before your first investment, answer four quick questions about your goals and risk.",
+                           "questions": list(investing.QUESTIONS)},
+                )
+            return self._nonexecuting(request_id, text, "BLOCKED", exc.reason_code, trace,
+                                      extra={"question": self._INVEST_QUESTIONS.get(exc.reason_code)})
+        trace.append({"stage": "ORDER_DRAFTED", "order_id": order["order_id"]})
+        return self._nonexecuting(
+            request_id, text, "ORDER_CONFIRMATION_REQUEST", "SIGNED_APPROVAL_REQUIRED", trace,
+            extra={"order": order, "question": f"{order['title']}. Confirm with your face?"},
+        )
+
+    def approve_order(self, order_id: str, order_digest: str, **kwargs: Any) -> dict[str, Any]:
+        trace = [{"stage": "ORDER_APPROVAL_RECEIVED"}]
+        try:
+            result = self.database.approve_order(order_id, order_digest, **kwargs)
+        except ReceiptRejected as exc:
+            result = {
+                "outcome": "BLOCKED",
+                "reason_code": exc.reason_code,
+                "trace": trace + [{"stage": exc.reason_code}],
+                "state": self.database.get_state(),
+            }
+        return self._audit_refusal(order_id, order_digest, result)
 
     def _answer_without_approval(
         self, request_id: str, text: str, trace: list[dict[str, Any]]

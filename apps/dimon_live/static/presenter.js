@@ -60,8 +60,20 @@ function showRequest(event) {
     return;
   }
   if (p.outcome === "ANSWERED") {
-    add("gateway", "Gateway", p.reason_code === "BALANCE_INQUIRY" ? "Balance read, no approval needed" : "Payment request recorded, no approval needed",
+    const answers = {
+      BALANCE_INQUIRY: "Balance read, no approval needed",
+      MONEY_REQUEST_SENT: "Payment request recorded, no approval needed",
+      INVESTMENT_PORTFOLIO: "Portfolio shown",
+      INVESTMENT_TRENDING: "Trending investments suggested by fixed rules, with risks",
+      INVESTMENT_PLANS: "Long-term plans matched to the risk profile",
+      INVESTMENT_QUOTE: "Price quote shown",
+    };
+    add("gateway", "Gateway", answers[p.reason_code] || words(p.reason_code),
       "Nothing leaves the account, so the AI is not used and no signature is asked for.");
+    return;
+  }
+  if (p.outcome === "ORDER_CONFIRMATION_REQUEST") {
+    add("gateway", "Gateway drafted", "Investment order built from your words", "Fixed rules, no AI. Waiting for the face and device confirmation.");
     return;
   }
   const proposal = describeProposal(p);
@@ -134,6 +146,15 @@ function show(event) {
       add("gateway", "Gateway accepted", p.total_minor != null ? `Batch settled: ${money(p.total_minor)}` : `Settled: ${money(p.amount_minor || 0)}`, "Written once, balanced, and chained into the audit log.");
       break;
     case "MONEY_REQUESTED":
+      break;
+    case "INVESTOR_PROFILE_SAVED":
+      add("gateway", "Gateway", `Investor profile saved: risk ${p.risk_score} of 5`, `${p.horizon_years}-year horizon decides which suggestions fit.`);
+      break;
+    case "TRADE_EXECUTED":
+      add("gateway", "Gateway accepted", `${p.side === "BUY" ? "Bought" : "Sold"} ${p.symbol} at ${money(p.price_minor)}`, "Filled within the signed price limit; cash and holdings changed together.");
+      break;
+    case "INVESTMENT_PLAN_STARTED":
+      add("gateway", "Gateway accepted", `Monthly plan started: ${p.name}`, `${money(p.monthly_minor)} a month; first instalment invested now.`);
       break;
     case "PAYEE_SAVED":
       add("gateway", "Gateway", "New payee saved", "S$100 cap and one-time code for the first 24 hours.");

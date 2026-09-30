@@ -5,6 +5,7 @@ import { requestAction } from "./action_request.mjs";
 import { accountDisplay } from "./account_display.mjs";
 import { DeviceApprover, wireAssertion } from "./device_approval.mjs";
 import { captureHeadTurn, faceMessages, openCamera, postFrames } from "./face_capture.mjs";
+import { openProfileDialog, renderInvestPanel, renderInvestingAnswer, renderOrderCard, requestOrderApproval } from "./invest_ui.mjs";
 import {
   createVoiceAudioContext,
   VoiceDeadline,
@@ -120,6 +121,29 @@ function renderLedger(transactions) {
   </tr>`).join("");
 }
 
+const investHelpers = {escapeHtml: value => escapeHtml(value), formatSgd: minor => formatSgd(minor)};
+let lastCommandText = "";
+
+function runCommand(text) {
+  resetCommandMode();
+  ui.input.value = text;
+  ui.form.requestSubmit();
+}
+
+async function loadInvestments() {
+  try {
+    const response = await fetch("/api/invest", {cache: "no-store"});
+    if (response.ok) renderInvestPanel(document.querySelector("#invest-board"), await response.json(), investHelpers);
+  } catch (_error) {
+    // The panel simply keeps its last values.
+  }
+}
+
+async function cancelPlan(planId) {
+  await fetch(`/api/invest/plans/${encodeURIComponent(planId)}/cancel`, {method: "POST"});
+  await loadInvestments();
+}
+
 function renderState(state) {
   renderAccounts(state.accounts || []);
   renderLedger(state.transactions || []);
@@ -148,7 +172,24 @@ const stageCopy = {
   KYC_PENDING: ["KYC incomplete", "No ledger mutation"],
   KYC_NOT_COMPLETED: ["Identity check not finished", "Nothing moved"],
   SCAM_SUSPECTED: ["Held: possible scam", "Stricter-only rule · nothing drafted"],
+  INPUT_FIREWALL_PASSED: ["Firewall passed", "No injection patterns"],
   NO_APPROVAL_NEEDED: ["No approval needed", "Nothing leaves your account"],
+  INVESTMENT_REQUEST_UNDERSTOOD: ["Investing request", "Fixed rules · no AI"],
+  INVESTMENT_PORTFOLIO: ["Portfolio", "Live simulated prices"],
+  INVESTMENT_TRENDING: ["Trending picks", "Rule-based, with risks"],
+  INVESTMENT_PLANS: ["Long-term plans", "Matched to your profile"],
+  INVESTMENT_QUOTE: ["Quote", "Simulated market"],
+  ORDER_DRAFTED: ["Order drafted", "Nothing bought or sold yet"],
+  ORDER_APPROVAL_RECEIVED: ["Order approval", "Stored order received"],
+  ORDER_FILLED: ["Order filled", "Within your signed price limit"],
+  PLAN_STARTED: ["Plan started", "First instalment invested"],
+  INVESTOR_PROFILE_REQUIRED: ["Investor profile needed", "Four questions first"],
+  RISK_ACKNOWLEDGEMENT_REQUIRED: ["Risk not acknowledged", "Nothing bought"],
+  PRICE_MOVED_BEYOND_LIMIT: ["Price moved too far", "Order not filled · nothing moved"],
+  NOT_HELD: ["Not in your portfolio", "Nothing sold"],
+  SELL_MORE_THAN_HELD: ["More than you hold", "Nothing sold"],
+  ORDER_LIMIT_EXCEEDED: ["Order limit", "Up to S$5,000 per order"],
+  DAILY_TRADING_LIMIT_EXCEEDED: ["Daily trading limit", "Up to S$10,000 a day"],
   BATCH_RECIPIENTS_RECOVERED_FROM_DIRECTORY: ["Several payments found", "Each name matched to one saved payee"],
   BATCH_REFERENCE_NOTED: ["Reference noted", "Applies to the whole batch"],
   BALANCE_INQUIRY: ["Balance read", "Read-only · no model, no signature"],
@@ -338,6 +379,22 @@ function renderCommit(result) {
       ["Approved with", approvalLabel(result)],
       ["Reference", reference(result.batch_transaction_id)],
     ], "All payments settled together in one step: either every payment moved or none did. Money out equals money in.");
+    return;
+  }
+  if (result.outcome === "EXECUTED_SYNTHETIC_TRADE" || result.outcome === "EXECUTED_INVESTMENT_PLAN") {
+    const trades = result.trades || [];
+    const cash = trades.reduce((sum, trade) => sum + trade.cash_minor, 0);
+    const selling = trades[0]?.side === "SELL";
+    setSettlement("committed", "Settled", [
+      ...(result.plan ? [
+        ["Plan", `${result.plan.name} · ${formatSgd(result.plan.monthly_minor)} a month`],
+        ["Next instalment", new Date(result.plan.next_run_at).toLocaleDateString()],
+      ] : []),
+      ...trades.map(trade => [trade.side === "BUY" ? "Bought" : "Sold", `${trade.quantity} × ${trade.name} at ${formatSgd(trade.price_minor)}`]),
+      [selling ? "Paid into savings" : "Taken from savings", `${formatSgd(cash)}${trades.some(t => t.fee_minor) ? ` (incl. ${formatSgd(trades.reduce((s, t) => s + t.fee_minor, 0))} fee)` : ""}`],
+      ["Approved with", approvalLabel(result)],
+      ["Reference", reference(result.order_id)],
+    ], "Filled at the live price within the limit you signed. Cash and holdings changed together in one step.");
     return;
   }
   if (result.outcome !== "EXECUTED_SYNTHETIC_TRANSFER") {
@@ -559,12 +616,14 @@ function confirmOnDevice(challenge, signerKind) {
   ui.approvalTotal.textContent = formatSgd(review.total_minor);
   ui.approvalDigest.textContent = `${review.receipt_digest.slice(0, 16)}…`;
   ui.approvalMethod.textContent = signer.label;
-  const unverified = (review.validation?.fields || []).filter(field => field.verdict !== "MATCH");
+  const unverified = review.kind === "ORDER" ? [] : (review.validation?.fields || []).filter(field => field.verdict !== "MATCH");
   ui.approvalValidation.className = unverified.length ? "approval-validation attention" : "approval-validation pass";
   ui.approvalValidation.innerHTML = unverified.length
     ? `<strong>Independent validator could not confirm ${unverified.length === 1 ? "this field" : "these fields"} from your words — check before signing:</strong>
        <ul>${unverified.map(field => `<li>${escapeHtml(field.field.replace(/^items\[\d+\]\./, ""))}: ${escapeHtml(field.draft_value)} — ${escapeHtml(field.note)}</li>`).join("")}</ul>`
-    : "<strong>Independent validator: every field matches your words.</strong>";
+    : review.kind === "ORDER"
+      ? `<strong>${escapeHtml(review.validation.note)}</strong>`
+      : "<strong>Independent validator: every field matches your words.</strong>";
   ui.approvalConfirm.textContent = signer.action;
   const facePrompt = document.querySelector("#approval-face-prompt");
   const faceVideo = document.querySelector("#approval-face-video");
@@ -597,7 +656,7 @@ function confirmOnDevice(challenge, signerKind) {
   const unusualItem = review.items.find(item => item.unusual_amount);
   ui.approvalUnusual.hidden = !needsUnusual;
   ui.approvalUnusualCheck.checked = false;
-  ui.approvalUnusualText.textContent = unusualItem
+  ui.approvalUnusualText.textContent = review.confirmation_text ? review.confirmation_text : unusualItem
     ? `Yes, ${formatSgd(unusualItem.amount_minor)} to ${unusualItem.recipient_display_name} is correct. You usually send ${formatSgd(unusualItem.unusual_amount.typical_min_minor)}–${formatSgd(unusualItem.unusual_amount.typical_max_minor)}.`
     : "";
   const codeReady = () => !needsCode || /^\d{6}$/.test(ui.approvalOobCode.value);
@@ -799,6 +858,16 @@ function approveReceipt(choice) {
   );
 }
 
+async function approveOrder(order) {
+  await signedApproval(
+    "orders",
+    order,
+    requestOrderApproval,
+    "Retry this exact order to retrieve its stored result; it can fill at most once.",
+  );
+  await loadInvestments();
+}
+
 function approveBatchReceipt(receipt) {
   return signedApproval(
     "batch-receipts",
@@ -847,6 +916,32 @@ function renderResult(result, elapsedMs) {
     if (result.resolved_action.destination_kind === "PAYNOW_MOBILE" && result.receipt?.receipt_id) {
       offerSavePayee(result.receipt.receipt_id, result.resolved_action);
     }
+  } else if (result.outcome === "ORDER_CONFIRMATION_REQUEST") {
+    setOutcome("clarification", "⇄", "Investment order · confirm with your face", result.order.title,
+      result.order.plan
+        ? "Nothing is invested until you confirm. The first instalment is invested now, then the same amount each month until you stop the plan."
+        : "Nothing is bought or sold until you confirm. Price protection: the order fills within 2% of this quote, or not at all.");
+    renderOrderCard(ui.candidateList, result.order, investHelpers, approveOrder);
+  } else if (result.outcome === "CLARIFICATION_REQUEST" && result.reason_code === "INVESTOR_PROFILE_REQUIRED") {
+    const pendingText = lastCommandText;
+    setOutcome("clarification", "?", "Investor profile needed", result.question, "Your answers decide which investments and plans suit you. Nothing has been bought.");
+    ui.candidateList.hidden = false;
+    ui.candidateList.innerHTML = '<button type="button" class="candidate-choice">Answer 4 questions</button>';
+    ui.candidateList.querySelector("button").addEventListener("click", async () => {
+      const saved = await openProfileDialog(result.questions);
+      if (!saved) return;
+      await loadInvestments();
+      if (pendingText) runCommand(pendingText);
+    });
+  } else if (result.outcome === "EXECUTED_SYNTHETIC_TRADE" || result.outcome === "EXECUTED_INVESTMENT_PLAN") {
+    setOutcome("success", "✓", result.outcome === "EXECUTED_INVESTMENT_PLAN" ? "Investment plan started" : "Order filled",
+      result.title, "Confirmed with your face and device. Your portfolio is updated below the balances.");
+    if (result.portfolio) renderInvestPanel(document.querySelector("#invest-board"), result.portfolio, investHelpers);
+  } else if (result.outcome === "ANSWERED" && result.investing) {
+    const titles = {TRENDING: "Trending investments", PLANS: "Long-term growth plans", PORTFOLIO: "Your portfolio", QUOTE: "Price and outlook"};
+    setOutcome("success", "i", titles[result.investing.view] || "Investing", result.answer,
+      "Rule-based on simulated market data and your risk profile; the AI is not used. Not financial advice.");
+    renderInvestingAnswer(ui.candidateList, result.investing, investHelpers, runCommand, cancelPlan);
   } else if (result.outcome === "ANSWERED") {
     const request = result.money_request;
     setOutcome("success", "i", "No approval needed", result.answer || "Done.",
@@ -925,7 +1020,7 @@ function renderResult(result, elapsedMs) {
       .join("; ");
     setOutcome("blocked", "!", "Transaction frozen", "The draft contradicts what you said.", `The independent validator compared the draft with your own words and froze it. ${discrepancies}. Nothing can be signed or executed; please restate the request.`);
   } else if (result.outcome === "BLOCKED") {
-    setOutcome("blocked", "!", "Action blocked", result.reason_code.replaceAll("_", " ").toLowerCase(), "Deterministic policy refused the action. Balances are unchanged.");
+    setOutcome("blocked", "!", "Action blocked", result.reason_code.replaceAll("_", " ").toLowerCase(), result.question || "Deterministic policy refused the action. Balances are unchanged.");
     if (result.reason_code === "CLARIFICATION_SCOPE_VIOLATION") {
       ui.newRequestButton.hidden = false;
     }
@@ -1164,6 +1259,7 @@ ui.form.addEventListener("submit", async event => {
   event.preventDefault();
   const text = ui.input.value.trim();
   if (!text) return;
+  if (!activeClarification) lastCommandText = text;
   lastRequestWasSpoken = false;
   const started = performance.now();
   setBusy(true);
@@ -1273,6 +1369,15 @@ document.querySelectorAll(".scenario-load").forEach(button => {
     ui.voiceStatus.textContent = "Prompt loaded · press Run intention to execute";
   });
 });
+
+document.querySelectorAll(".invest-action[data-say]").forEach(button => {
+  button.addEventListener("click", () => runCommand(button.dataset.say));
+});
+document.querySelector("#invest-profile-button")?.addEventListener("click", async () => {
+  const overview = await fetch("/api/invest", {cache: "no-store"}).then(r => r.json());
+  if (await openProfileDialog(overview.questions)) await loadInvestments();
+});
+void loadInvestments();
 
 Promise.all([loadSession(), loadState()]).catch(error => {
   ui.healthText.textContent = "Gateway unavailable";

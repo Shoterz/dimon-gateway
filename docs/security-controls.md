@@ -50,6 +50,7 @@ with `SIGNED_APPROVAL_REQUIRED` when no signature is supplied.
 | **Traceability and auditability** | Append-only, hash-chained events: request text, voice transcript + audio SHA-256 (+ WAV), model raw output, receipts, every validation, challenges, verified signatures, refusals, commits. Triggers refuse UPDATE/DELETE; `verify_chain` detects tampering. Per-receipt bundle re-verifies the signature. | `audit_log.py`, `/api/audit`, `/api/audit/receipts/{id}` | `test_audit_log.py` |
 | **Scenario 1: KYC and basic risk control** | Onboarding through a mock Singpass Myinfo retrieval (single-use, 10-minute consent) registers the account's face (live scan, under that consent) and the approval key at the same moment, and binds both: KYC cannot complete without the face, only that device can approve, and other credentials are revoked. One account, one face: a later onboarding (new device) must present the same face. Face templates (128 floats, no images) and every scan record live in a separate database file (`<ledger>.faces.db`). KYC status (`VERIFIED`, expiry) gates every movement. | `kyc.py`, `risk_policy.py`, `signing_store.py` | `test_api.py` (KYC tests), `test_risk_policy.py::test_unverified_or_expired_kyc_blocks_every_movement` |
 | **Voice: what you hear is what you sign** | The read-back sentence is generated from the same server review JSON the overlay renders, spoken by Kokoro (or Tencent Cloud TTS when configured), with the browser's voice as fallback. A failed playback does not count as heard. | `read_back.py`, `tencent_tts.py`, `speech.py` | `test_read_back_and_payees.py` |
+| **Investing under the same controls** | Buy, sell and monthly plans in a simulated market of fictional instruments. Orders are parsed by fixed rules from the user's words (instrument, side, quantity or amount), never by the model. Each becomes an immutable order receipt (canonical JSON + SHA-256 digest) that must be confirmed with the registered face and the bound device over a one-time challenge; the gateway re-checks KYC, read-back (≥ S$200), token (> S$2,000) and a risk acknowledgement (instrument above the investor profile) inside the filling transaction. Price protection fills within 2% of the signed quote or refuses. Cash and holdings move together, with double entries in `investment_cash_entries`. A four-question investor profile is required before the first order. Suggestions (trending, long-term plans, projections) are rule-based on price data and the profile and always list risks next to strengths. | `investing.py`, `market.py`, `database.py` (`issue_order_challenge`, `approve_order`), `static/invest_ui.mjs` | `test_investing.py` |
 | **Everyday speech** | Singlish and bare amounts ("pay alicia ten bucks", "send john smith twenty can?") are read only in a payment slot, never after words that introduce counts ("for 2 cakes", "3 times", "500 cents"). Nicknames ("my mum") resolve to one saved payee. Several payments in one sentence become one batch receipt with every full name and account ending shown. | `grounding.py`, `validation_agent.py`, `payees.py`, `service.py` | `test_everyday_speech.py` |
 
 ## Demo limits (synthetic customer)
@@ -64,6 +65,8 @@ with `SIGNED_APPROVAL_REQUIRED` when no signature is supplied.
 | Unusual amount | More than 3× the largest past payment (needs 2+ past payments) |
 | Transfers per 10 minutes | 5 (then paused) |
 | Small transfers (under S$10) per 10 minutes | 3 |
+| Investment order | Up to S$5,000; S$10,000 of trading per day; fills within 2% of the quote |
+| Monthly investment plan | S$50 to S$2,000 a month |
 
 ## Live walkthrough
 
@@ -120,9 +123,14 @@ the right (*AI proposed / Checker said / Gateway accepted or refused*).
 - **Tamper-evident, not tamper-proof.** The audit chain lives in the same
   SQLite file. It detects rewriting; anchoring the head hash externally
   (e.g. a WORM store) would make it tamper-proof.
-- **Scope of intents.** Saved-payee transfers, PayNow, and saved-payee batches
-  are supported. Bill payments, internal transfers, and equities are not yet
-  implemented; the validator's asset-class check applies once they are.
+- **Scope of intents.** Saved-payee transfers, PayNow, saved-payee batches,
+  and investing (buy, sell, monthly plans) are supported. Bill payments and
+  internal transfers are not yet implemented.
+- **Simulated market.** Instruments are fictional and prices follow a
+  deterministic random walk; there is no exchange connection, no order book,
+  and orders fill instantly at the simulated price. Plan instalments run when
+  the portfolio is next opened after their due date. Suggestions are rules
+  over this data, not regulated financial advice.
 - **Single synthetic customer.** One demo user and profile per session.
 - **Social engineering.** A user can still approve a clearly displayed
   malicious receipt; the scam hold, limits, the validator, and out-of-band
