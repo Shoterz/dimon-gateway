@@ -147,6 +147,18 @@ function show(event) {
       break;
     case "MONEY_REQUESTED":
       break;
+    case "SINGPASS_AUTHORISATION_REQUESTED":
+      add("gateway", "Singpass", "Authorisation sent to the Singpass app", "For this exact order only; valid 5 minutes, usable once.");
+      break;
+    case "SINGPASS_APPROVED":
+      add("gateway", "Singpass", "Approved in the Singpass app", "Signed by Singpass's own key.");
+      break;
+    case "SINGPASS_REJECTED":
+      add("refused", "Singpass", "Rejected in the Singpass app", "Nothing can be bought or sold.");
+      break;
+    case "SINGPASS_AUTHORISATION_CONSUMED":
+      add("gateway", "Gateway", "Singpass approval verified and spent inside execution", `Identity ${p.uinfin_masked}.`);
+      break;
     case "INVESTOR_PROFILE_SAVED":
       add("gateway", "Gateway", `Investor profile saved: risk ${p.risk_score} of 5`, `${p.horizon_years}-year horizon decides which suggestions fit.`);
       break;

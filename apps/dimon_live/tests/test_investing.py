@@ -61,7 +61,13 @@ class InvestingTests(unittest.TestCase):
         self.assertEqual(result["outcome"], "ORDER_CONFIRMATION_REQUEST", result)
         return result["order"]
 
-    def approve(self, order, *, face=True, **kwargs):
+    def singpass(self, order, approve=True):
+        request = self.database.request_singpass_authorisation(order["order_id"], order["order_digest"])
+        return self.database.singpass_decide(request["auth_id"], approve)
+
+    def approve(self, order, *, face=True, singpass=True, **kwargs):
+        if singpass:
+            self.singpass(order)
         challenge = self.database.issue_order_challenge(order["order_id"], order["order_digest"], rp_id=self.device.rp_id)
         if face:
             assertion = self.device.sign(challenge)
@@ -143,6 +149,7 @@ class InvestingTests(unittest.TestCase):
         challenge = self.database.issue_order_challenge(order["order_id"], order["order_digest"], rp_id=self.device.rp_id)
         self.assertTrue(challenge["review"]["requires_unusual_confirmation"])
         self.assertIn("riskier than my profile", challenge["review"]["confirmation_text"])
+        self.singpass(order)
         refused = self.service.approve_order(order["order_id"], order["order_digest"],
                                              assertion=self.device.sign(challenge), context=self.device.context,
                                              read_back_played=True)
@@ -183,6 +190,71 @@ class InvestingTests(unittest.TestCase):
         with self.assertRaises(ReceiptRejected) as caught:
             self.database.issue_order_challenge(order["order_id"], "0" * 64, rp_id=self.device.rp_id)
         self.assertEqual(caught.exception.reason_code, "RECEIPT_DIGEST_MISMATCH")
+
+    # ------------------------------------------------------------ singpass
+    def test_investment_orders_need_singpass_as_well_as_face_and_device(self):
+        self.profile()
+        before = self.savings()
+        order = self.order("buy 3 shares of straits telco")
+        result = self.approve(order, singpass=False)
+        self.assertEqual((result["outcome"], result["reason_code"]), ("BLOCKED", "SINGPASS_AUTHORISATION_REQUIRED"))
+        self.assertEqual(self.savings(), before)
+        # Nothing was burned by the refusal: approve in Singpass and it fills.
+        filled = self.approve(order)
+        self.assertEqual(filled["outcome"], "EXECUTED_SYNTHETIC_TRADE")
+        self.assertTrue(filled["approval"]["singpass_auth_id"].startswith("sgauth_"))
+        self.assertEqual(filled["approval"]["singpass_uinfin"], "S****001Z")
+        events = [e["event_type"] for e in self.database.audit_overview()["events"]]
+        for event in ("SINGPASS_AUTHORISATION_REQUESTED", "SINGPASS_APPROVED", "SINGPASS_AUTHORISATION_CONSUMED"):
+            self.assertIn(event, events)
+
+    def test_a_singpass_rejection_stops_the_order(self):
+        self.profile()
+        order = self.order("buy 3 shares of straits telco")
+        self.singpass(order, approve=False)
+        result = self.approve(order, singpass=False)
+        self.assertEqual(result["reason_code"], "SINGPASS_REJECTED")
+        self.assertEqual(self.database.investing_overview()["holdings"], [])
+
+    def test_a_singpass_approval_covers_only_its_own_order_and_only_once(self):
+        self.profile()
+        first, second = self.order("buy 2 shares of straits telco"), self.order("buy 4 shares of straits telco")
+        self.singpass(first)
+        self.assertEqual(self.approve(second, singpass=False)["reason_code"], "SINGPASS_AUTHORISATION_REQUIRED")
+        self.assertEqual(self.approve(first, singpass=False)["outcome"], "EXECUTED_SYNTHETIC_TRADE")
+        with self.assertRaises(ReceiptRejected):
+            self.database.request_singpass_authorisation(first["order_id"], first["order_digest"])
+
+    def test_singpass_decisions_are_signed_and_tampering_is_detected(self):
+        self.profile()
+        order = self.order("buy 2 shares of straits telco")
+        self.singpass(order)
+        with closing(sqlite3.connect(self.database.path)) as connection:
+            connection.execute("UPDATE singpass_authorisations SET signature = 'f00d' WHERE order_id = ?", (order["order_id"],))
+            connection.commit()
+        self.assertEqual(self.approve(order, singpass=False)["reason_code"], "SINGPASS_SIGNATURE_INVALID")
+
+    def test_singpass_needs_an_identity_verified_through_myinfo(self):
+        self.profile()
+        order = self.order("buy 2 shares of straits telco")
+        with closing(sqlite3.connect(self.database.path)) as connection:
+            connection.execute("UPDATE customer_profiles SET kyc_method = 'BRANCH'")
+            connection.commit()
+        with self.assertRaises(ReceiptRejected) as caught:
+            self.database.request_singpass_authorisation(order["order_id"], order["order_digest"])
+        self.assertEqual(caught.exception.reason_code, "SINGPASS_IDENTITY_REQUIRED")
+
+    def test_the_singpass_app_shows_the_exact_order_and_match_code(self):
+        self.profile()
+        order = self.order("buy 2 shares of straits telco")
+        request = self.database.request_singpass_authorisation(order["order_id"], order["order_digest"])
+        shown = self.database.singpass_pending()
+        self.assertEqual(len(shown), 1)
+        self.assertEqual((shown[0]["title"], shown[0]["total_minor"], shown[0]["match_code"]),
+                         (order["title"], order["total_minor"], request["match_code"]))
+        self.assertEqual(shown[0]["uinfin_masked"], "S****001Z")
+        again = self.database.request_singpass_authorisation(order["order_id"], order["order_digest"])
+        self.assertEqual([p["auth_id"] for p in self.database.singpass_pending()], [again["auth_id"]])
 
     # ------------------------------------------------------------ plans
     def test_monthly_plan_invests_now_and_again_each_month_until_cancelled(self):

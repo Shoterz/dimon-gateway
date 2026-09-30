@@ -211,6 +211,22 @@
       </div>
     </dialog>
 
+    <dialog id="singpass-dialog" class="approval-dialog singpass-dialog" aria-labelledby="singpass-title">
+      <p class="approval-kicker">Investment transaction · Singpass authorisation required</p>
+      <h2 id="singpass-title">Authorise with Singpass</h2>
+      <div id="singpass-details" class="singpass-details"></div>
+      <div class="singpass-match">
+        <small>Approve in your Singpass app and check it shows this code</small>
+        <strong id="singpass-code">--</strong>
+      </div>
+      <p id="singpass-status" class="approval-note" role="status"></p>
+      <p class="approval-note">After Singpass, you'll confirm with your face as usual.</p>
+      <div class="approval-actions">
+        <button id="singpass-cancel" type="button" class="approval-cancel">Cancel</button>
+        <button id="singpass-open" type="button" class="approval-confirm">Open Singpass app (mock)</button>
+      </div>
+    </dialog>
+
     <dialog id="profile-dialog" class="approval-dialog profile-dialog" aria-labelledby="profile-title">
       <p class="approval-kicker">Investor profile · needed before your first investment</p>
       <h2 id="profile-title">Your goals and comfort with risk</h2>

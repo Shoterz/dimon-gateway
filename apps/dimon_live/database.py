@@ -24,7 +24,7 @@ from .name_resolution import (
     rank_name_candidates,
     rank_phonetic_candidates,
 )
-from . import audit_log, investing, kyc
+from . import audit_log, investing, kyc, singpass
 from .face_id import FaceRejected, FaceStore, default_engine, face_database_path
 from .approval_gateway import approval_challenge, b64url_encode, verify_signature
 from .audit_log import AUDIT_SCHEMA
@@ -417,6 +417,7 @@ class Database:
             connection.executescript(PAYEE_SCHEMA)
             connection.executescript(REQUESTS_SCHEMA)
             connection.executescript(investing.INVESTING_SCHEMA)
+            connection.executescript(singpass.SINGPASS_SCHEMA)
             seed_profile(connection, DEMO_USER_ID, self._clock(), kyc_status="PENDING")
             kyc.migrate(connection)
             self._apply_v2_migrations(connection)
@@ -573,8 +574,8 @@ class Database:
                 connection.execute("DELETE FROM review_receipts")
                 connection.execute("DELETE FROM action_attempts")
                 connection.execute("DELETE FROM money_requests")
-                for table in ("investment_cash_entries", "trades", "holdings", "plan_runs",
-                              "investment_plans", "investment_orders"):
+                for table in ("singpass_authorisations", "investment_cash_entries", "trades", "holdings",
+                              "plan_runs", "investment_plans", "investment_orders"):
                     connection.execute(f"DELETE FROM {table}")
                 connection.execute("DELETE FROM beneficiary_aliases")
                 connection.execute("DELETE FROM prior_payments")
@@ -2518,6 +2519,52 @@ class Database:
             raise ReceiptRejected("RECEIPT_EXPIRED", persist_status=True)
         return row
 
+    def request_singpass_authorisation(
+        self, order_id: str, order_digest: str, user_id: str = DEMO_USER_ID, *, now: datetime | None = None
+    ) -> dict[str, Any]:
+        """Send one exact investment order to the customer's Singpass app."""
+
+        now = now or self._clock()
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                row = self._awaiting_order(connection, order_id, order_digest, user_id, now)
+                request = singpass.request(
+                    connection, user_id=user_id, order_id=order_id, order_digest=order_digest,
+                    title=investing.order_title(row), total_minor=row["total_minor"], now=now,
+                )
+            except singpass.SingpassRejected as exc:
+                connection.rollback()
+                raise ReceiptRejected(exc.reason_code) from None
+            except ReceiptRejected as exc:
+                if exc.persist_status:
+                    connection.commit()
+                else:
+                    connection.rollback()
+                raise
+            audit_log.append(connection, "SINGPASS_AUTHORISATION_REQUESTED",
+                             {"auth_id": request["auth_id"], "order_digest": order_digest}, now=now, receipt_id=order_id)
+            connection.commit()
+            return request
+
+    def singpass_authorisation(self, auth_id: str, user_id: str = DEMO_USER_ID) -> dict[str, Any]:
+        with self._connect() as connection:
+            return singpass.status(connection, user_id, auth_id, self._clock())
+
+    def singpass_pending(self, user_id: str = DEMO_USER_ID) -> list[dict[str, Any]]:
+        with self._connect() as connection:
+            return singpass.pending(connection, user_id, self._clock())
+
+    def singpass_decide(self, auth_id: str, approve: bool, user_id: str = DEMO_USER_ID) -> dict[str, Any]:
+        now = self._clock()
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            decision = singpass.decide(connection, user_id=user_id, auth_id=auth_id, approve=approve, now=now)
+            audit_log.append(connection, "SINGPASS_APPROVED" if approve else "SINGPASS_REJECTED",
+                             {"auth_id": auth_id}, now=now, receipt_id=decision["order_id"])
+            connection.commit()
+            return decision
+
     def issue_order_challenge(
         self, order_id: str, order_digest: str, *, rp_id: str, user_id: str = DEMO_USER_ID,
         now: datetime | None = None,
@@ -2579,10 +2626,26 @@ class Database:
                     raise ReceiptRejected("READ_BACK_REQUIRED")
                 if row["risk_ack_required"] and not risk_acknowledged:
                     raise ReceiptRejected("RISK_ACKNOWLEDGEMENT_REQUIRED")
+                # Investment transactions also need Singpass: checked first
+                # without spending, so a missing approval burns nothing.
+                try:
+                    singpass.require_approved(connection, user_id=user_id, order_id=order_id,
+                                              order_digest=order_digest, now=now)
+                except singpass.SingpassRejected as exc:
+                    raise ReceiptRejected(exc.reason_code) from None
                 approval = self._require_device_signature(
                     connection, assertion, context, purpose="APPROVE_RECEIPT", receipt_id=order_id,
                     receipt_digest=order_digest, user_id=user_id, executed=False, now=now,
                 )
+                try:
+                    authorisation = singpass.consume(connection, user_id=user_id, order_id=order_id,
+                                                     order_digest=order_digest, now=now)
+                except singpass.SingpassRejected as exc:
+                    raise ReceiptRejected(exc.reason_code, persist_status=True) from None
+                audit_log.append(connection, "SINGPASS_AUTHORISATION_CONSUMED",
+                                 {**authorisation, "order_digest": order_digest}, now=now, receipt_id=order_id)
+                approval = {**approval, "singpass_auth_id": authorisation["auth_id"],
+                            "singpass_uinfin": authorisation["uinfin_masked"]}
                 try:
                     result = investing.execute_order(connection, row, now)
                 except investing.InvestRejected as exc:
@@ -2611,6 +2674,7 @@ class Database:
             **result,
             "trace": [
                 {"stage": "ORDER_APPROVAL_RECEIVED"},
+                {"stage": "SINGPASS_AUTHORISED"},
                 {"stage": "FACE_MATCH_VERIFIED"},
                 {"stage": "DEVICE_SIGNATURE_VERIFIED"},
                 {"stage": "ORDER_FILLED" if row["kind"] != "PLAN" else "PLAN_STARTED"},

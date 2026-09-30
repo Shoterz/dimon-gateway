@@ -26,7 +26,7 @@ from .approval_gateway import (
 )
 from .database import Database, ReceiptRejected
 from .face_id import MAX_FRAMES, MIN_FRAMES, FaceRejected
-from . import investing, market
+from . import investing, market, singpass
 from .payees import PayeeSaveRejected
 from .read_back import build_read_back
 from .tencent_tts import read_back_synthesizer_from_env
@@ -115,6 +115,13 @@ class KycCompletionRequest(CredentialRegistrationRequest):
 # in memory and discarded; only their hashes are kept.
 FaceFrame = Annotated[str, Field(min_length=64, max_length=560_000, pattern=r"^[A-Za-z0-9+/=_-]+$")]
 FaceFrames = Annotated[list[FaceFrame], Field(min_length=MIN_FRAMES, max_length=MAX_FRAMES)]
+
+
+class SingpassRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    order_id: Annotated[str, Field(pattern=r"^order_[0-9a-f]{32}$")]
+    order_digest: ReceiptDigest
 
 
 class InvestorAnswers(BaseModel):
@@ -387,6 +394,52 @@ def create_app(
                 raise HTTPException(status_code=exc.status_code, detail=exc.reason_code) from exc
         return HTMLResponse(
             (STATIC_DIR / "mock_token.html").read_text(encoding="utf-8"),
+            headers={"Cache-Control": "no-store"},
+        )
+
+    # Singpass authorisation for investment transactions. The Singpass app
+    # here is a mock service; its decisions are signed with Singpass's own key.
+    @application.post("/api/singpass/authorisations")
+    async def singpass_request(request: Request, response: Response, body: SingpassRequest):
+        context = resolve(request, response)
+        try:
+            return context.database.request_singpass_authorisation(body.order_id, body.order_digest)
+        except ReceiptRejected as exc:
+            raise HTTPException(status_code=400, detail=exc.reason_code) from exc
+
+    @application.get("/api/singpass/authorisations/{auth_id}")
+    async def singpass_status(request: Request, response: Response, auth_id: str):
+        context = resolve(request, response)
+        try:
+            return context.database.singpass_authorisation(auth_id)
+        except singpass.SingpassRejected as exc:
+            raise HTTPException(status_code=404, detail=exc.reason_code) from exc
+
+    @application.get("/api/singpass/pending")
+    async def singpass_pending(request: Request, response: Response):
+        context = resolve(request, response)
+        return {"simulated_service": "Mock Singpass app", "pending": context.database.singpass_pending()}
+
+    @application.post("/api/singpass/authorisations/{auth_id}/{decision}")
+    async def singpass_decision(request: Request, response: Response, auth_id: str, decision: Literal["approve", "reject"]):
+        context = resolve(request, response)
+        try:
+            return context.database.singpass_decide(auth_id, decision == "approve")
+        except singpass.SingpassRejected as exc:
+            raise HTTPException(status_code=409, detail=exc.reason_code) from exc
+
+    @application.get("/mock-singpass", include_in_schema=False)
+    async def mock_singpass_page(request: Request):
+        if manager.legacy_database is None:
+            try:
+                manager._assert_origin(
+                    request.headers.get("origin"),
+                    request.headers.get("host", "").lower(),
+                )
+            except SessionBoundaryError as exc:
+                raise HTTPException(status_code=exc.status_code, detail=exc.reason_code) from exc
+        return HTMLResponse(
+            (STATIC_DIR / "mock_singpass.html").read_text(encoding="utf-8"),
             headers={"Cache-Control": "no-store"},
         )
 

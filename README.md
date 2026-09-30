@@ -353,7 +353,13 @@ your profile needs an extra "I understand" tick.
 **Safety, the same as payments:**
 - Orders are built by fixed rules from **your own words**; the AI plays no
   part in them and never gives investment advice.
-- Every order and plan is confirmed with **your face** and your device.
+- Every stock, fund and plan transaction is **authorised with Singpass**
+  first: Dimon sends the exact order to your Singpass app (a mock Singpass
+  window opens: click **Open Singpass app (mock)**), which shows what you're
+  buying or selling, the amount, your masked NRIC, and a two-digit code.
+  Check the code matches the one on the Dimon screen, then **Approve**. The
+  approval works for that one order only, once, within 5 minutes.
+- Then you confirm with **your face** and your device, as for payments.
   Orders of S$200 or more are read back first, and over S$2,000 also need the
   token code.
 - **Price protection:** an order fills within 2% of the price you saw, or not

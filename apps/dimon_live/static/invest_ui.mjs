@@ -194,3 +194,54 @@ export function openProfileDialog(questions) {
     dialog.showModal();
   });
 }
+
+// Singpass authorisation for an investment order: the request goes to the
+// (mock) Singpass app, which shows the same order and match code. Resolves
+// true once approved there; false if rejected, expired or cancelled.
+export function authoriseWithSingpass(order, {escapeHtml, formatSgd}) {
+  const dialog = document.querySelector("#singpass-dialog");
+  const details = dialog.querySelector("#singpass-details");
+  const code = dialog.querySelector("#singpass-code");
+  const status = dialog.querySelector("#singpass-status");
+  const open = dialog.querySelector("#singpass-open");
+  const cancel = dialog.querySelector("#singpass-cancel");
+  return new Promise(async resolve => {
+    let timer = null;
+    const finish = result => {
+      clearInterval(timer);
+      open.onclick = null;
+      cancel.onclick = null;
+      dialog.oncancel = null;
+      dialog.close();
+      resolve(result);
+    };
+    const response = await fetch("/api/singpass/authorisations", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({order_id: order.order_id, order_digest: order.order_digest}),
+    });
+    const request = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      resolve({approved: false, reason: request.detail || `HTTP_${response.status}`});
+      return;
+    }
+    details.innerHTML = `<strong>${escapeHtml(request.title)}</strong><span>${escapeHtml(formatSgd(request.total_minor))}</span>`;
+    code.textContent = request.match_code;
+    status.textContent = "Waiting for your approval in the Singpass app…";
+    status.className = "approval-note";
+    open.onclick = () => window.open("/mock-singpass", "dimon-singpass", "width=420,height=760");
+    cancel.onclick = () => finish({approved: false, reason: "SINGPASS_CANCELLED"});
+    dialog.oncancel = event => { event.preventDefault(); finish({approved: false, reason: "SINGPASS_CANCELLED"}); };
+    dialog.showModal();
+    timer = setInterval(async () => {
+      const current = await fetch(`/api/singpass/authorisations/${encodeURIComponent(request.auth_id)}`, {cache: "no-store"})
+        .then(r => r.json()).catch(() => ({}));
+      if (current.status === "APPROVED") {
+        status.textContent = "Approved in Singpass.";
+        setTimeout(() => finish({approved: true}), 500);
+      } else if (["REJECTED", "EXPIRED", "SUPERSEDED"].includes(current.status)) {
+        finish({approved: false, reason: `SINGPASS_${current.status}`});
+      }
+    }, 1500);
+  });
+}

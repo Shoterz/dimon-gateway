@@ -5,7 +5,7 @@ import { requestAction } from "./action_request.mjs";
 import { accountDisplay } from "./account_display.mjs";
 import { DeviceApprover, wireAssertion } from "./device_approval.mjs";
 import { captureHeadTurn, faceMessages, openCamera, postFrames } from "./face_capture.mjs";
-import { openProfileDialog, renderInvestPanel, renderInvestingAnswer, renderOrderCard, requestOrderApproval } from "./invest_ui.mjs";
+import { authoriseWithSingpass, openProfileDialog, renderInvestPanel, renderInvestingAnswer, renderOrderCard, requestOrderApproval } from "./invest_ui.mjs";
 import {
   createVoiceAudioContext,
   VoiceDeadline,
@@ -181,6 +181,12 @@ const stageCopy = {
   INVESTMENT_QUOTE: ["Quote", "Simulated market"],
   ORDER_DRAFTED: ["Order drafted", "Nothing bought or sold yet"],
   ORDER_APPROVAL_RECEIVED: ["Order approval", "Stored order received"],
+  SINGPASS_AUTHORISED: ["Singpass authorised", "Signed approval for this order"],
+  SINGPASS_AUTHORISATION_REQUIRED: ["Singpass approval needed", "Nothing bought or sold"],
+  SINGPASS_REJECTED: ["Rejected in Singpass", "Nothing bought or sold"],
+  SINGPASS_CANCELLED: ["Singpass cancelled", "Nothing bought or sold"],
+  SINGPASS_EXPIRED: ["Singpass request expired", "Start the order again"],
+  SINGPASS_IDENTITY_REQUIRED: ["Singpass identity needed", "Verify through Myinfo first"],
   ORDER_FILLED: ["Order filled", "Within your signed price limit"],
   PLAN_STARTED: ["Plan started", "First instalment invested"],
   INVESTOR_PROFILE_REQUIRED: ["Investor profile needed", "Four questions first"],
@@ -351,6 +357,8 @@ function approvalLabel(result) {
   const face = result.approval?.face_similarity != null
     ? `Your face (${Math.round(result.approval.face_similarity * 100)}% match) + `
     : "";
+  const singpass = result.approval?.singpass_auth_id ? "Singpass + " : "";
+  if (singpass) return `${singpass}${face}${kind === "WEBAUTHN_PLATFORM" ? "Windows Hello" : "this device's key"}`;
   if (kind === "WEBAUTHN_PLATFORM") return `${face}Windows Hello / Touch ID`;
   if (kind === "MOCK_DEVICE_KEY") return `${face}this device's key`;
   return `${face}your device signature`;
@@ -859,6 +867,18 @@ function approveReceipt(choice) {
 }
 
 async function approveOrder(order) {
+  // Stock and equity transactions: Singpass first, then face and device.
+  try {
+    await ensureSigningCredential();
+  } catch (error) {
+    renderApprovalRefusal(error.reasonCode || "KYC_NOT_COMPLETED", "Identity verification was not completed. Nothing was bought or sold.");
+    return;
+  }
+  const singpassResult = await authoriseWithSingpass(order, investHelpers);
+  if (!singpassResult.approved) {
+    renderApprovalRefusal(singpassResult.reason, "Singpass did not authorise this order. Nothing was bought or sold.");
+    return;
+  }
   await signedApproval(
     "orders",
     order,

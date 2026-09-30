@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Singpass app (mock)</title>
+    <style>
+      :root { --ink: #101418; --panel: #1b2229; --line: #313b45; --paper: #eef2f5; --muted: #9aa6b1; --accent: #e8474f; --ok: #6fd39b; color-scheme: dark; font-family: Inter, "Segoe UI", Helvetica, Arial, sans-serif; }
+      body { margin: 0; min-height: 100vh; background: var(--ink); color: var(--paper); display: grid; place-items: start center; }
+      main { width: min(380px, calc(100vw - 32px)); padding: 24px 0; }
+      .banner { margin: 0 0 16px; padding: 8px 10px; border: 1px dashed #f1ca74; color: #f1ca74; font-size: 12px; line-height: 1.5; }
+      .brand { display: flex; align-items: center; gap: 10px; margin: 0 0 18px; }
+      .brand b { display: grid; place-items: center; width: 34px; height: 34px; border-radius: 9px; background: var(--accent); font-size: 18px; }
+      .brand span { font-weight: 700; font-size: 18px; }
+      .brand small { display: block; color: var(--muted); font-weight: 400; font-size: 12px; }
+      .request { margin: 0 0 12px; padding: 16px; border: 1px solid var(--line); border-radius: 14px; background: var(--panel); }
+      .request h2 { margin: 0 0 4px; font-size: 16px; }
+      .request p { margin: 6px 0; font-size: 14px; line-height: 1.45; }
+      .request dl { display: grid; grid-template-columns: auto 1fr; gap: 6px 12px; margin: 12px 0; font-size: 13px; }
+      .request dt { color: var(--muted); }
+      .request dd { margin: 0; overflow-wrap: anywhere; }
+      .match { margin: 12px 0; padding: 12px; border-radius: 10px; background: rgba(232, 71, 79, .12); text-align: center; }
+      .match strong { display: block; font-size: 40px; letter-spacing: .1em; font-family: "Cascadia Mono", Consolas, monospace; }
+      .match small { color: var(--muted); }
+      .actions { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+      button { min-height: 46px; border-radius: 10px; font: inherit; font-weight: 600; cursor: pointer; }
+      .reject { border: 1px solid var(--line); background: transparent; color: var(--paper); }
+      .approve { border: 0; background: var(--accent); color: #fff; }
+      .empty, .note { color: var(--muted); font-size: 14px; line-height: 1.5; }
+      .done { color: var(--ok); }
+    </style>
+  </head>
+  <body>
+    <main>
+      <p class="banner">Mock Singpass app. In real life this request appears in the Singpass app on your phone; it opens in a second window here because Singpass is simulated.</p>
+      <div class="brand"><b>S</b><span>Singpass <small>Authorise a transaction (mock)</small></span></div>
+      <div id="requests" aria-live="polite"><p class="empty">No requests waiting.</p></div>
+      <p class="note">Only approve a request you started yourself. Check that the code matches the one on the Dimon screen. Singpass will never ask you to approve something you did not start.</p>
+    </main>
+    <script type="module">
+      const root = document.querySelector("#requests");
+      const formatSgd = minor => `S$${(minor / 100).toLocaleString("en-SG", {minimumFractionDigits: 2, maximumFractionDigits: 2})}`;
+      const escapeHtml = value => String(value).replace(/[&<>"']/g, character => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"})[character]);
+      let busy = false;
+      let lastMessage = "";
+      async function refresh() {
+        if (busy) return;
+        try {
+          const response = await fetch("/api/singpass/pending", {cache: "no-store"});
+          const body = await response.json();
+          root.innerHTML = body.pending?.length
+            ? body.pending.map(item => `<article class="request">
+                <h2>${escapeHtml(item.requester)} requests your approval</h2>
+                <p><strong>${escapeHtml(item.title)}</strong></p>
+                <dl>
+                  <dt>Amount</dt><dd>${escapeHtml(formatSgd(item.total_minor))}</dd>
+                  <dt>NRIC</dt><dd>${escapeHtml(item.uinfin_masked)}</dd>
+                  <dt>Order</dt><dd>${escapeHtml(item.order_digest_short)}</dd>
+                  <dt>Expires</dt><dd>${escapeHtml(new Date(item.expires_at).toLocaleTimeString())}</dd>
+                </dl>
+                <div class="match"><small>Check this matches the code on the Dimon screen</small><strong>${escapeHtml(item.match_code)}</strong></div>
+                <div class="actions">
+                  <button type="button" class="reject" data-auth="${escapeHtml(item.auth_id)}" data-decision="reject">Reject</button>
+                  <button type="button" class="approve" data-auth="${escapeHtml(item.auth_id)}" data-decision="approve">Approve</button>
+                </div>
+              </article>`).join("")
+            : `<p class="empty ${lastMessage ? "done" : ""}">${escapeHtml(lastMessage || "No requests waiting.")}</p>`;
+          root.querySelectorAll("button[data-auth]").forEach(button => button.addEventListener("click", () => decide(button)));
+        } catch (_error) {
+          root.innerHTML = '<p class="empty">Singpass is offline.</p>';
+        }
+      }
+      async function decide(button) {
+        busy = true;
+        root.querySelectorAll("button").forEach(b => { b.disabled = true; });
+        const response = await fetch(`/api/singpass/authorisations/${encodeURIComponent(button.dataset.auth)}/${button.dataset.decision}`, {method: "POST"});
+        lastMessage = response.ok
+          ? (button.dataset.decision === "approve" ? "Approved. Return to Dimon to confirm with your face." : "Rejected. Nothing will be bought or sold.")
+          : "That request is no longer valid.";
+        busy = false;
+        await refresh();
+      }
+      refresh();
+      setInterval(refresh, 1500);
+    </script>
+  </body>
+</html>
