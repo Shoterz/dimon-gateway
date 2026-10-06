@@ -112,6 +112,54 @@ h2 { font-size: 15px; letter-spacing: -.01em; font-weight: 800; }
 .account-card.changed { animation: balance-settle 720ms cubic-bezier(.2,.8,.2,1); }
 .skeleton-card { height: 92px; border-radius: 16px; background: linear-gradient(90deg, #eee, #f6f6f6, #eee); background-size: 200% 100%; animation: shimmer 1.5s infinite; }
 
+/* Two-up grid for "Your accounts" (Savings + Investments), as in the real
+   app's home screen reference photo. Falls back gracefully with one card. */
+.account-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.account-grid .account-card { min-height: 108px; grid-template-columns: 1fr; align-items: start; gap: 4px; padding: 15px; }
+.account-grid .account-balance { font-size: 19px; margin-top: 6px; }
+@media (max-width: 360px) { .account-grid { grid-template-columns: 1fr; } }
+body.balances-hidden .account-balance { filter: blur(7px); user-select: none; }
+.balance-eye { border: 1px solid var(--line); border-radius: 50%; width: 30px; height: 30px; display: grid; place-items: center; background: #fff; color: var(--muted); font-size: 13px; padding: 0; }
+.balance-eye[aria-pressed="true"] { color: var(--dbs-red); border-color: var(--dbs-red); }
+
+/* Evidence: other participants' ledger balances, deliberately separated from
+   "Your accounts" but kept reachable -- proves real balance mutation without
+   pretending these belong to the signed-in user. */
+.evidence-details { border-radius: 14px; border: 1px solid var(--line); background: #fafafa; overflow: hidden; }
+.evidence-details summary { display: flex; align-items: baseline; justify-content: space-between; gap: 14px; padding: 13px 14px; cursor: pointer; list-style-position: inside; font-size: 13px; font-weight: 750; }
+.evidence-details summary::marker { color: var(--faint); }
+.evidence-details summary span { color: var(--faint); font: 10px/1 ui-monospace, monospace; letter-spacing: .06em; text-transform: uppercase; }
+.evidence-details #evidence-account-list { padding: 0 10px 10px; display: grid; gap: 8px; }
+.evidence-details #evidence-account-list .account-card { min-height: 64px; padding: 12px 14px; border-radius: 12px; }
+.evidence-details #evidence-account-list .account-balance { font-size: 17px; }
+
+/* ---------- Home hero: red header chrome, static/decorative, matches the
+   real app's reference photo (profile, log out, notifications, promo
+   banner). Nothing here is wired to real auth/notifications/offers. ---------- */
+.home-hero { margin: -18px -18px 0; padding: 14px 18px 20px; background: linear-gradient(160deg, var(--dbs-red) 0%, var(--dbs-red-dark) 100%); border-radius: 0 0 22px 22px; color: #fff; }
+.hero-top { display: flex; align-items: center; gap: 10px; }
+.hero-chip, .hero-bell { position: relative; width: 32px; height: 32px; border-radius: 50%; background: rgba(255,255,255,.16); display: grid; place-items: center; font-size: 14px; }
+.hero-logout { margin-left: auto; padding: 5px 11px; border-radius: 999px; border: 1px solid rgba(255,255,255,.6); font-size: 10.5px; font-weight: 800; letter-spacing: .04em; }
+.hero-badge { position: absolute; top: -4px; right: -4px; min-width: 15px; height: 15px; padding: 0 3px; border-radius: 999px; background: #1A1A1E; color: #fff; font: 800 9px/15px ui-monospace, monospace; text-align: center; }
+.hero-avatar { width: 36px; height: 36px; border-radius: 50%; background: #fff; color: var(--dbs-red-dark); display: grid; place-items: center; font-weight: 800; font-size: 13px; }
+.hero-promo { margin-top: 16px; padding: 14px 40px 14px 14px; border-radius: 14px; background: rgba(255,255,255,.13); position: relative; }
+.hero-promo-title { margin: 0 0 3px; font-size: 14px; font-weight: 800; }
+.hero-promo-sub { margin: 0; font-size: 11.5px; line-height: 1.4; color: rgba(255,255,255,.88); }
+.hero-promo-arrow { position: absolute; right: 12px; top: 50%; transform: translateY(-50%); font-size: 20px; opacity: .8; }
+
+/* ---------- Quick-action shortcut row, under the hero ---------- */
+.shortcut-row { display: grid; grid-template-columns: repeat(5, 1fr); gap: 4px; margin-top: -8px; }
+.shortcut-item { display: flex; flex-direction: column; align-items: center; gap: 6px; border: 0; background: transparent; padding: 8px 2px; color: var(--ink); font-size: 10px; font-weight: 700; }
+.shortcut-icon { width: 42px; height: 42px; border-radius: 50%; background: var(--dbs-red-soft); color: var(--dbs-red-dark); display: grid; place-items: center; font-size: 17px; }
+.shortcut-item:hover .shortcut-icon { background: var(--dbs-red); color: #fff; }
+
+/* ---------- Discover: trust/feature callouts styled like the photo's
+   "Discover more" tiles, but honest about this system's real behavior ---------- */
+.discover-grid { display: grid; gap: 10px; }
+.discover-card { padding: 14px; border-radius: 14px; border: 1px solid var(--line); background: #fff; }
+.discover-title { margin: 0 0 4px; font-size: 13px; font-weight: 800; }
+.discover-sub { margin: 0; font-size: 12px; line-height: 1.5; color: var(--muted); }
+
 /* ---------- Command box (Pay tab) ---------- */
 .command-form { display: flex; flex-direction: column; gap: 10px; }
 .command-form > label { display: block; margin-bottom: 2px; font-size: 13px; font-weight: 700; }

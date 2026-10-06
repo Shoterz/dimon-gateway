@@ -15,6 +15,8 @@ import {describeVoiceFailure, reportVoiceFailure} from "./voice_failure.mjs";
 
 const ui = {
   accountList: document.querySelector("#account-list"),
+  evidenceAccountList: document.querySelector("#evidence-account-list"),
+  balanceEye: document.querySelector("#balance-eye"),
   form: document.querySelector("#command-form"),
   input: document.querySelector("#command-input"),
   runButton: document.querySelector("#run-button"),
@@ -128,6 +130,15 @@ ui.reviewButton.addEventListener("click", openReviewSheet);
 ui.reviewSheetClose.addEventListener("click", closeReviewSheet);
 ui.reviewBackdrop.addEventListener("click", closeReviewSheet);
 
+// Hide/show balances (visual privacy toggle, like the real app's eye icon).
+// Purely a client-side CSS blur -- no data is withheld from the gateway.
+ui.balanceEye.addEventListener("click", () => {
+  const hidden = document.body.classList.toggle("balances-hidden");
+  ui.balanceEye.setAttribute("aria-pressed", String(hidden));
+  ui.balanceEye.setAttribute("aria-label", hidden ? "Show balances" : "Hide balances");
+  ui.balanceEye.textContent = hidden ? "🙈" : "👁";
+});
+
 // ---------- Contacts (saved payees), kept off the Home/savings screen ----------
 // Placeholder data for this frontend build: the backend only exposes saving a
 // new payee today (POST /api/payees), not listing existing ones. Replace this
@@ -157,21 +168,50 @@ function renderContacts() {
   });
 }
 
+function accountCardHtml(account, changed) {
+  const classes = ["account-card", account.is_user_source ? "source" : "", changed ? "changed" : ""].filter(Boolean).join(" ");
+  const display = accountDisplay(account);
+  return `<article class="${classes}">
+    <div>
+      <p class="account-owner">${escapeHtml(display.ownerLabel)}</p>
+      <p class="account-label">${escapeHtml(account.label)}</p>
+      ${display.proxyLabel ? `<p class="account-proxy">${escapeHtml(display.proxyLabel)}</p>` : ""}
+    </div>
+    <p class="account-balance">${formatSgd(account.balance_minor)}</p>
+  </article>`;
+}
+
+// Investments isn't a real ledger account -- it mirrors the invest board's
+// total so "Your accounts" has a genuine second card (like the real app's
+// Deposits + digiWealth pairing) instead of a lone Savings card.
+let lastAccounts = [];
+let lastInvestTotalMinor = null;
+function investmentsCardHtml() {
+  if (lastInvestTotalMinor == null) return "";
+  return `<article class="account-card">
+    <div>
+      <p class="account-owner">Your portfolio</p>
+      <p class="account-label">Investments</p>
+    </div>
+    <p class="account-balance">${formatSgd(lastInvestTotalMinor)}</p>
+  </article>`;
+}
+
+// "Your accounts" shows only the signed-in demo user's own account(s) --
+// matching the real app's own home screen. Every other balance in this
+// synthetic ledger belongs to a saved payee, not the user; those move to a
+// clearly separate, collapsed "evidence" section so a transfer's real
+// balance change is still provable without implying they're the user's own.
 function renderAccounts(accounts) {
-  ui.accountList.innerHTML = accounts.map(account => {
-    const changed = previousBalances.has(account.account_id)
-      && previousBalances.get(account.account_id) !== account.balance_minor;
-    const classes = ["account-card", account.is_user_source ? "source" : "", changed ? "changed" : ""].filter(Boolean).join(" ");
-    const display = accountDisplay(account);
-    return `<article class="${classes}">
-      <div>
-        <p class="account-owner">${escapeHtml(display.ownerLabel)}</p>
-        <p class="account-label">${escapeHtml(account.label)}</p>
-        ${display.proxyLabel ? `<p class="account-proxy">${escapeHtml(display.proxyLabel)}</p>` : ""}
-      </div>
-      <p class="account-balance">${formatSgd(account.balance_minor)}</p>
-    </article>`;
-  }).join("");
+  lastAccounts = accounts;
+  const changedOf = account => previousBalances.has(account.account_id)
+    && previousBalances.get(account.account_id) !== account.balance_minor;
+  const mine = accounts.filter(account => account.is_user_source);
+  const others = accounts.filter(account => !account.is_user_source);
+  ui.accountList.innerHTML = mine.map(account => accountCardHtml(account, changedOf(account))).join("") + investmentsCardHtml();
+  ui.evidenceAccountList.innerHTML = others.length
+    ? others.map(account => accountCardHtml(account, changedOf(account))).join("")
+    : '<p class="invest-empty">No other participants yet.</p>';
   previousBalances = new Map(accounts.map(account => [account.account_id, account.balance_minor]));
 }
 
@@ -200,7 +240,13 @@ function runCommand(text) {
 async function loadInvestments() {
   try {
     const response = await fetch("/api/invest", {cache: "no-store"});
-    if (response.ok) renderInvestPanel(document.querySelector("#invest-board"), await response.json(), investHelpers);
+    if (!response.ok) return;
+    const overview = await response.json();
+    renderInvestPanel(document.querySelector("#invest-board"), overview, investHelpers);
+    if (typeof overview.total_value_minor === "number") {
+      lastInvestTotalMinor = overview.total_value_minor;
+      if (lastAccounts.length) renderAccounts(lastAccounts);
+    }
   } catch (_error) {
     // The panel simply keeps its last values.
   }

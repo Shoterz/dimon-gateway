@@ -28,28 +28,54 @@
 
       <main class="workspace">
         <!-- ================= HOME: balances + ledger history ================= -->
+        <!-- Visual reference: a photo of the real digibank home screen after
+             login. The hero chrome below (chip/log-out/bell/avatar/promo) is
+             static decoration for visual fidelity -- none of it is wired to
+             real auth, notifications, or offers, since this prototype has
+             none of those. -->
         <section id="tab-home" class="tab-panel" data-tab="home">
-          <div class="intro">
-            <p class="eyebrow">Natural language → signed settlement</p>
-            <h1>Good day.<br><em>What would you like to do?</em></h1>
-            <p class="lede">Qwen proposes the intent. Deterministic code decides whether this synthetic ledger may move.</p>
+          <div class="home-hero">
+            <div class="hero-top">
+              <span class="hero-chip" aria-hidden="true">💬</span>
+              <span class="hero-bell" aria-hidden="true">🔔<span class="hero-badge">3</span></span>
+              <span class="hero-logout">LOG OUT</span>
+              <span class="hero-avatar" aria-hidden="true">DU</span>
+            </div>
+            <div class="hero-promo">
+              <p class="hero-promo-title">Your approval, your signature</p>
+              <p class="hero-promo-sub">Every transfer needs your face and device key before anything moves.</p>
+              <span class="hero-promo-arrow" aria-hidden="true">›</span>
+            </div>
           </div>
+
+          <nav class="shortcut-row" aria-label="Quick actions">
+            <button type="button" class="shortcut-item nav-item" data-tab-target="pay"><span class="shortcut-icon" aria-hidden="true">⇄</span>Pay</button>
+            <button type="button" class="shortcut-item nav-item" data-tab-target="contacts"><span class="shortcut-icon" aria-hidden="true">◎</span>Contacts</button>
+            <button type="button" class="shortcut-item nav-item" data-tab-target="invest"><span class="shortcut-icon" aria-hidden="true">▲</span>Invest</button>
+            <button id="reset-button" type="button" class="shortcut-item"><span class="shortcut-icon" aria-hidden="true">↺</span>Reset</button>
+            <button type="button" class="shortcut-item nav-item" data-tab-target="more"><span class="shortcut-icon" aria-hidden="true">⋯</span>More</button>
+          </nav>
 
           <section class="balance-board" aria-labelledby="balance-title">
             <div class="section-heading">
-              <h2 id="balance-title">Savings &amp; accounts</h2>
-              <span>SGD · minor-unit exact</span>
+              <h2 id="balance-title">Your accounts</h2>
+              <button type="button" id="balance-eye" class="balance-eye" aria-pressed="false" aria-label="Hide balances">👁</button>
             </div>
-            <div id="account-list" class="account-list" aria-live="polite">
+            <div id="account-list" class="account-grid" aria-live="polite">
               <div class="skeleton-card"></div>
               <div class="skeleton-card"></div>
             </div>
           </section>
 
+          <details class="evidence-details">
+            <summary>Other ledger balances <span>Evidence · not yours</span></summary>
+            <p class="playbook-intro">These belong to saved payees, not you -- shown so you can see real balance changes after a transfer settles.</p>
+            <div id="evidence-account-list"></div>
+          </details>
+
           <section class="ledger-panel" aria-labelledby="ledger-title">
             <div class="section-heading">
               <h2 id="ledger-title">Committed ledger</h2>
-              <button id="reset-button" class="text-button" type="button">Reset demo</button>
             </div>
             <div class="table-wrap">
               <table>
@@ -60,6 +86,24 @@
                   <tr class="empty-row"><td colspan="4">No committed transfers yet.</td></tr>
                 </tbody>
               </table>
+            </div>
+          </section>
+
+          <section class="discover-board" aria-labelledby="discover-title">
+            <div class="section-heading"><h2 id="discover-title">Discover more</h2></div>
+            <div class="discover-grid">
+              <article class="discover-card">
+                <p class="discover-title">Independent validator</p>
+                <p class="discover-sub">A second, deterministic reader checks every draft against your own words before you can sign it.</p>
+              </article>
+              <article class="discover-card">
+                <p class="discover-title">Device-signed approval</p>
+                <p class="discover-sub">Your face and device key sign the exact receipt digest -- the AI never holds that authority.</p>
+              </article>
+              <article class="discover-card">
+                <p class="discover-title">Injection firewall</p>
+                <p class="discover-sub">Hostile text hidden in a reference or bill can't grant execution authority on its own.</p>
+              </article>
             </div>
           </section>
         </section>
