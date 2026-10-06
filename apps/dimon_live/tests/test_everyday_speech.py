@@ -105,7 +105,7 @@ class ValidatorNicknameTests(unittest.TestCase):
 class EverydaySpeechServiceTests(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
-        self.database = Database(Path(self.temp_dir.name) / "ledger.sqlite3")
+        self.database = Database(Path(self.temp_dir.name) / "ledger.sqlite3", single_account=True)
         self.database.initialize()
 
     def tearDown(self):
@@ -166,7 +166,7 @@ class EverydaySpeechServiceTests(unittest.TestCase):
 class NoApprovalTests(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
-        self.database = Database(Path(self.temp_dir.name) / "ledger.sqlite3")
+        self.database = Database(Path(self.temp_dir.name) / "ledger.sqlite3", single_account=True)
         self.database.initialize()
 
     def tearDown(self):
@@ -225,9 +225,14 @@ class NoApprovalTests(unittest.TestCase):
         self.assertEqual(self.process(958, "request S$20 from Bob")["reason_code"], "UNKNOWN_RECIPIENT")
 
     def test_anything_that_pays_out_still_goes_through_signing(self):
+        # Two requests: the balance is answered, the payment still needs a signed receipt.
         result = self.process(959, "Check my balance and send Alicia Powell S$5")
-        self.assertNotEqual(result["outcome"], "ANSWERED")
-        self.assertEqual(len(self.extractor.calls), 1)
+        self.assertEqual(result["outcome"], "MULTI_REQUEST")
+        balance, payment = (step["result"] for step in result["steps"])
+        self.assertEqual(balance["outcome"], "ANSWERED")
+        self.assertNotEqual(payment["outcome"], "ANSWERED")
+        self.assertTrue(payment["receipt_choices"])
+        self.assertEqual(payment["state"]["transactions"], [])
 
 
 if __name__ == "__main__":

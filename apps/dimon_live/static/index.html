@@ -56,7 +56,7 @@
             <button type="button" class="invest-action" data-say="Show my portfolio">My portfolio</button>
             <button type="button" id="invest-profile-button" class="invest-action">Risk profile</button>
           </div>
-          <p class="invest-disclaimer">Simulated market with fictional companies and funds. Suggestions are rule-based, not financial advice.</p>
+          <p class="invest-disclaimer">Simulated market: fictional local companies plus well-known US stocks at generated prices (not live quotes). Suggestions are rule-based, not financial advice.</p>
         </section>
 
         <form id="command-form" class="command-form">
@@ -80,6 +80,45 @@
           </div>
         </form>
 
+        <section id="hands-free-panel" class="assistant-panel" aria-labelledby="hands-free-title">
+          <div class="section-heading">
+            <h2 id="hands-free-title">Hands-free</h2>
+            <span>"Hey Dimon"</span>
+          </div>
+          <p class="assistant-intro">Turn it on, then say <em>"Hey Dimon, send Alicia two dollars from savings"</em>. Dimon only reacts to its name; everything else is ignored and never stored. Payments under S$200 can be confirmed by saying a one-time phrase in your registered voice. Larger payments, new payees and investments still need your face.</p>
+          <div class="voice-row">
+            <button id="hands-free-button" class="voice-button" type="button" aria-pressed="false">
+              <span aria-hidden="true">●</span>
+              <span>Turn on "Hey Dimon"</span>
+            </button>
+            <span id="hands-free-status" class="voice-status" aria-live="polite">Hands-free off</span>
+          </div>
+          <div class="voice-row">
+            <button id="voice-register-button" class="voice-button" type="button">
+              <span aria-hidden="true">◎</span>
+              <span>Register my voice</span>
+            </button>
+            <span id="voice-register-note" class="voice-status" aria-live="polite"></span>
+          </div>
+          <div id="hands-free-log" class="assistant-log" aria-live="polite" hidden></div>
+        </section>
+
+        <section id="assistant-panel" class="assistant-panel" aria-labelledby="assistant-title" hidden>
+          <div class="section-heading">
+            <h2 id="assistant-title">Ask Dimon</h2>
+            <span>Live voice · TRTC</span>
+          </div>
+          <p class="assistant-intro">Talk through how the app works. Dimon can explain, but it can't see your accounts or move money — use <em>Speak request</em> for that.</p>
+          <div class="voice-row">
+            <button id="assistant-button" class="voice-button" type="button" aria-pressed="false">
+              <span aria-hidden="true">●</span>
+              <span>Talk to Dimon</span>
+            </button>
+            <span id="assistant-status" class="voice-status" aria-live="polite">Microphone off</span>
+          </div>
+          <div id="assistant-log" class="assistant-log" aria-live="polite" hidden></div>
+        </section>
+
         <section class="test-playbook" aria-labelledby="playbook-title">
           <details>
             <summary id="playbook-title">Team test playbook <span>Five safe probes</span></summary>
@@ -99,7 +138,7 @@
                 <h3>Ambiguous first name</h3>
                 <p>Checks that the gateway asks which saved John should receive the transfer.</p>
                 <code>Send John S$2.50.</code>
-                <p class="scenario-expectation">Expected: asks John Smith or John Tan; no ledger mutation.</p>
+                <p class="scenario-expectation">Expected: asks which account pays, then John Smith or John Tan; no ledger mutation.</p>
                 <button type="button" class="scenario-load" data-prompt="Send John S$2.50.">Load prompt</button>
               </article>
 
@@ -108,7 +147,7 @@
                 <h3>Missing amount</h3>
                 <p>Checks that recipient and reference stay locked while the amount is requested.</p>
                 <code>send Alicia Powell money for flowers</code>
-                <p class="scenario-expectation">Expected: asks for one amount; no ledger mutation.</p>
+                <p class="scenario-expectation">Expected: asks which account, then for one amount; no ledger mutation.</p>
                 <button type="button" class="scenario-load" data-prompt="send Alicia Powell money for flowers">Load prompt</button>
               </article>
 
@@ -117,7 +156,7 @@
                 <h3>Directory-backed destination</h3>
                 <p>Checks that an explicit PayNow number resolves through the synthetic directory.</p>
                 <code>PayNow 8695 2933 ten dollars for flowers.</code>
-                <p class="scenario-expectation">Expected: JXXX SXXXX appears and a receipt is required.</p>
+                <p class="scenario-expectation">Expected: asks which account, then JXXX SXXXX appears and a receipt is required.</p>
                 <button type="button" class="scenario-load" data-prompt="PayNow 8695 2933 ten dollars for flowers.">Load prompt</button>
               </article>
 
@@ -138,6 +177,7 @@
         <article id="outcome-panel" class="outcome-panel waiting" aria-live="assertive">
           <div class="outcome-index" id="outcome-index">00</div>
           <div>
+            <nav id="plan-bar" class="plan-bar" aria-label="Your requests" hidden></nav>
             <p class="outcome-kicker" id="outcome-kicker">Awaiting intention</p>
             <h2 id="outcome-title">The ledger is standing by.</h2>
             <p id="outcome-detail">Submit a natural-language transfer to expose every stage between model output and database commit.</p>

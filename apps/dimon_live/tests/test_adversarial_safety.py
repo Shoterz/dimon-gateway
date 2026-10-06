@@ -58,7 +58,7 @@ class StaticExtractor:
 class AdversarialSafetyTests(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
-        self.database = Database(Path(self.temp_dir.name) / "demo.sqlite3")
+        self.database = Database(Path(self.temp_dir.name) / "demo.sqlite3", single_account=True)
         self.database.initialize()
 
     def tearDown(self):

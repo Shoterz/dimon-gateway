@@ -89,7 +89,7 @@ Use BENEFICIARY_TRANSFER_BATCH only when the user names two to four distinct sav
 Copy every evidence value as an exact substring of the user's text.
 Do not calculate, copy, or return an amount. Deterministic server code derives money directly from the original user text.
 Use null for an absent value and its evidence. Never infer or default a source, recipient, proxy, or reference.
-SOURCE RULE: source_account_ref and source_evidence are non-null only when the user explicitly names a funding account in the request. Otherwise both must be null. Never output current, current account, default account, a PayNow proxy, or a recipient as the source.
+SOURCE RULE: source_account_ref and source_evidence are non-null only when the user explicitly names a funding account in the request. Otherwise both must be null. The user's own accounts are savings and everyday, and the user may name them by position: "my first account" or "my second account", after words such as from, on, using, or out of. For "on my second account" return source_account_ref "second account" and source_evidence "my second account". Never output current, current account, default account, a PayNow proxy, or a recipient as the source.
 REFERENCE RULE: payment_reference and reference_evidence are non-null only for an explicit payment purpose or message, such as words introduced by "for" or "reference". A recipient plus amount is not a payment reference.
 PAYNOW RULE: a mobile number belongs only in mobile_proxy and proxy_evidence. It is never a source account.
 Never output a masked recipient name, canonical account ID, beneficiary ID, receipt, approval, Python, shell command, tool name, or prose.

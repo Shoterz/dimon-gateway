@@ -44,6 +44,54 @@
       "payload": "intent/prompt-injection.json"
     },
     {
+      "case_id": "missing-amount-from-savings",
+      "input": "send Alicia Powell money for flowers from savings",
+      "outcome": "intent",
+      "payload": "intent/missing-amount-from-savings.json"
+    },
+    {
+      "case_id": "missing-amount-from-everyday",
+      "input": "send Alicia Powell money for flowers from everyday",
+      "outcome": "intent",
+      "payload": "intent/missing-amount-from-everyday.json"
+    },
+    {
+      "case_id": "paynow-exact-from-savings",
+      "input": "PayNow 8695 2933 ten dollars for flowers from savings",
+      "outcome": "intent",
+      "payload": "intent/paynow-exact-from-savings.json"
+    },
+    {
+      "case_id": "paynow-exact-from-everyday",
+      "input": "PayNow 8695 2933 ten dollars for flowers from everyday",
+      "outcome": "intent",
+      "payload": "intent/paynow-exact-from-everyday.json"
+    },
+    {
+      "case_id": "paynow-unknown-from-savings",
+      "input": "PayNow 8695 2938 ten dollars from savings",
+      "outcome": "intent",
+      "payload": "intent/paynow-unknown-from-savings.json"
+    },
+    {
+      "case_id": "paynow-unknown-from-everyday",
+      "input": "PayNow 8695 2938 ten dollars from everyday",
+      "outcome": "intent",
+      "payload": "intent/paynow-unknown-from-everyday.json"
+    },
+    {
+      "case_id": "saved-beneficiary-batch-from-savings",
+      "input": "Send John Smith S$6.50 and Alicia Powell S$4 from savings",
+      "outcome": "intent",
+      "payload": "intent/saved-beneficiary-batch-from-savings.json"
+    },
+    {
+      "case_id": "saved-beneficiary-batch-from-everyday",
+      "input": "Send John Smith S$6.50 and Alicia Powell S$4 from everyday",
+      "outcome": "intent",
+      "payload": "intent/saved-beneficiary-batch-from-everyday.json"
+    },
+    {
       "case_id": "malformed-output",
       "input": "Fixture: return malformed model output.",
       "outcome": "invalid_output",

@@ -1,0 +1,12 @@
+{
+  "contract_version": 3,
+  "kind": "BENEFICIARY_TRANSFER",
+  "source_account_ref": "savings",
+  "source_evidence": "savings",
+  "recipient_label": "Alicia Powell",
+  "recipient_evidence": "Alicia Powell",
+  "currency": "SGD",
+  "payment_reference": "flowers",
+  "reference_evidence": "for flowers",
+  "requested_execution_date": null
+}

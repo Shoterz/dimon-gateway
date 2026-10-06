@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import base64
+import functools
+import hashlib
 import json
+import re
 import sqlite3
 import uuid
 from contextlib import contextmanager
@@ -24,8 +27,15 @@ from .name_resolution import (
     rank_name_candidates,
     rank_phonetic_candidates,
 )
-from . import audit_log, investing, kyc, singpass
+from . import audit_log, investing, kyc, payee_additions, singpass
 from .face_id import FaceRejected, FaceStore, default_engine, face_database_path
+from .voiceprint import (
+    VOICE_MAX_MINOR,
+    VoiceRejected,
+    VoiceStore,
+    default_engine as default_speaker_engine,
+    voice_database_path,
+)
 from .approval_gateway import approval_challenge, b64url_encode, verify_signature
 from .audit_log import AUDIT_SCHEMA
 from .risk_policy import (
@@ -300,8 +310,41 @@ CREATE TABLE IF NOT EXISTS batch_receipt_executions (
 );
 """
 
+EVERYDAY_ACCOUNT = ("acct_everyday_01", "Demo User", "everyday", "everyday", "SGD", 250000, 1)
+
+# The user's own accounts in the order they are numbered when someone says
+# "my first account" or "my second account". Savings is first.
+USER_ACCOUNT_ORDER = ("acct_savings_01", "acct_everyday_01")
+
+LEDGER_PAGE_SIZE = 1024
+# Every module whose code creates, migrates, or seeds ledger tables. Any edit
+# to one of them gives existing ledgers a new stamp, so they are upgraded once.
+_SCHEMA_MODULES = (
+    "database.py", "payees.py", "investing.py", "singpass.py", "kyc.py", "payee_additions.py",
+    "audit_log.py", "signing_store.py", "risk_policy.py", "validation_store.py", "no_approval.py",
+)
+
+
+@functools.lru_cache(maxsize=2)
+def _schema_version(single_account: bool) -> int:
+    digest = hashlib.sha256(f"single={single_account}".encode())
+    here = Path(__file__).resolve().parent
+    for name in _SCHEMA_MODULES:
+        path = here / name
+        if path.is_file():
+            digest.update(name.encode() + path.read_bytes())
+    return int(digest.hexdigest()[:7], 16)   # fits SQLite's 32-bit user_version
+
+
+_SOURCE_POSITIONS = {
+    **{f"{word} account": 0 for word in ("first", "1st", "primary", "main")},
+    **{f"{word} account": 1 for word in ("second", "2nd")},
+    "first": 0, "1st": 0, "second": 1, "2nd": 1,
+}
+
 SEED_ACCOUNTS = (
     ("acct_savings_01", "Demo User", "savings", "savings", "SGD", 100000, 1),
+    EVERYDAY_ACCOUNT,
     (
         "acct_john_smith_01",
         "John Smith",
@@ -366,6 +409,16 @@ PAYNOW_BENEFICIARY = (
 )
 
 
+PAYNOW_DIRECTORY_EXTRA = (
+    (
+        ("acct_paynow_mxxx_01", "MXXX LXX", "MXXX LXX", "paynow 88008800", "SGD", 0, 0),
+        ("beneficiary_paynow_mxxx_01", "MXXX LXX", "paynow:88008800", "acct_paynow_mxxx_01",
+         "PayNow •••• 8800", "PAYNOW"),
+        ("88008800", "MXXX LXX", "beneficiary_paynow_mxxx_01"),
+    ),
+)
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -381,13 +434,24 @@ class Database:
         *,
         clock: Callable[[], datetime] | None = None,
         face_engine: Any = None,
+        single_account: bool = False,
+        voice_engine: Any = None,
     ):
         self.path = Path(path)
+        # A ledger with only the savings account (no "everyday"), the shape
+        # used before the second account existed. Off in the app.
+        self.single_account = single_account
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         # Faces live in their own database file, never in the ledger.
         self.face_engine = face_engine
         self.face_store = FaceStore(
             face_database_path(self.path), lambda: self.face_engine or default_engine()
+        )
+        # The voiceprint lives in its own file too. None means the installed
+        # ONNX speaker model; tests inject a stand-in.
+        self.voice_engine = voice_engine
+        self.voice_store = VoiceStore(
+            voice_database_path(self.path), lambda: self.voice_engine or default_speaker_engine()
         )
 
     @contextmanager
@@ -405,28 +469,57 @@ class Database:
             connection.close()
 
     def initialize(self) -> None:
+        """Create or upgrade the ledger. Runs the full schema only when the
+        file was made by different code: the stamp in PRAGMA user_version
+        makes every later call, in any process, a single read."""
+
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        version = _schema_version(self.single_account)
         with self._connect() as connection:
-            connection.executescript(SCHEMA)
-            connection.executescript(V2_SCHEMA)
-            connection.executescript(BATCH_SCHEMA)
-            connection.executescript(SIGNING_SCHEMA)
-            connection.executescript(VALIDATION_SCHEMA)
-            connection.executescript(POLICY_SCHEMA)
-            connection.executescript(AUDIT_SCHEMA)
-            connection.executescript(PAYEE_SCHEMA)
-            connection.executescript(REQUESTS_SCHEMA)
-            connection.executescript(investing.INVESTING_SCHEMA)
-            connection.executescript(singpass.SINGPASS_SCHEMA)
-            seed_profile(connection, DEMO_USER_ID, self._clock(), kyc_status="PENDING")
-            kyc.migrate(connection)
-            self._apply_v2_migrations(connection)
-            count = connection.execute("SELECT COUNT(*) FROM accounts").fetchone()[0]
-            if count == 0:
-                self._insert_seed(connection)
-            else:
-                self._insert_paynow_seed(connection)
-                seed_payees(connection, self._clock())
+            if connection.execute("PRAGMA user_version").fetchone()[0] == version:
+                return
+            if connection.execute("SELECT COUNT(*) FROM sqlite_master").fetchone()[0] == 0:
+                # Small pages: a fresh ledger is ~130 KB instead of ~450 KB,
+                # which matters at a million users. Must precede any table.
+                connection.execute(f"PRAGMA page_size = {LEDGER_PAGE_SIZE}")
+            # A ledger has one user, and each operation opens and closes its
+            # own connection, so SQLite's default rollback journal is cheaper
+            # than WAL (which checkpoints and deletes its files on every close).
+            self._create_or_upgrade(connection)
+            connection.execute(f"PRAGMA user_version = {version}")
+
+    def _create_or_upgrade(self, connection: sqlite3.Connection) -> None:
+        connection.executescript(SCHEMA)
+        connection.executescript(V2_SCHEMA)
+        connection.executescript(BATCH_SCHEMA)
+        connection.executescript(SIGNING_SCHEMA)
+        connection.executescript(VALIDATION_SCHEMA)
+        connection.executescript(POLICY_SCHEMA)
+        connection.executescript(AUDIT_SCHEMA)
+        connection.executescript(PAYEE_SCHEMA)
+        connection.executescript(REQUESTS_SCHEMA)
+        connection.executescript(investing.INVESTING_SCHEMA)
+        connection.executescript(singpass.SINGPASS_SCHEMA)
+        connection.executescript(payee_additions.PAYEE_ADDITION_SCHEMA)
+        seed_profile(connection, DEMO_USER_ID, self._clock(), kyc_status="PENDING")
+        kyc.migrate(connection)
+        self._apply_v2_migrations(connection)
+        count = connection.execute("SELECT COUNT(*) FROM accounts").fetchone()[0]
+        if count == 0:
+            self._insert_seed(connection)
+        else:
+            if not self.single_account:
+                connection.execute(
+                    """
+                    INSERT OR IGNORE INTO accounts (
+                      account_id, owner_display_name, label, normalized_label,
+                      currency, balance_minor, is_user_source
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    EVERYDAY_ACCOUNT,
+                )
+            self._insert_paynow_seed(connection)
+            seed_payees(connection, self._clock())
 
     @staticmethod
     def _apply_v2_migrations(connection: sqlite3.Connection) -> None:
@@ -499,7 +592,8 @@ class Database:
               currency, balance_minor, is_user_source
             ) VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
-            SEED_ACCOUNTS,
+            [account for account in SEED_ACCOUNTS
+             if not (self.single_account and account == EVERYDAY_ACCOUNT)],
         )
         connection.executemany(
             """
@@ -548,6 +642,34 @@ class Database:
             ) VALUES ('86952933', 1, 'JXXX SXXXX', 'beneficiary_paynow_jxxx_01')
             """
         )
+        # A second registered number, not yet saved as anyone's payee.
+        for account, beneficiary, proxy in PAYNOW_DIRECTORY_EXTRA:
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO accounts (
+                  account_id, owner_display_name, label, normalized_label,
+                  currency, balance_minor, is_user_source
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                account,
+            )
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO beneficiaries (
+                  beneficiary_id, display_name, normalized_alias,
+                  destination_account_id, masked_destination, directory_kind
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                beneficiary,
+            )
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO paynow_proxies (
+                  canonical_proxy, is_active, masked_name, beneficiary_id
+                ) VALUES (?, 1, ?, ?)
+                """,
+                proxy,
+            )
 
     def reset(self) -> dict[str, Any]:
         with self._connect() as connection:
@@ -569,6 +691,7 @@ class Database:
                 connection.execute("DELETE FROM ledger_transactions")
                 connection.execute("DELETE FROM authorization_records")
                 connection.execute("DELETE FROM clarification_sessions")
+                connection.execute("DELETE FROM payee_additions")
                 connection.execute("DELETE FROM paynow_lookups")
                 connection.execute("DELETE FROM paynow_proxies")
                 connection.execute("DELETE FROM review_receipts")
@@ -609,7 +732,10 @@ class Database:
                          LIMIT 1
                        ) AS paynow_proxy
                 FROM accounts a
-                ORDER BY a.is_user_source DESC, a.label COLLATE NOCASE
+                ORDER BY a.is_user_source DESC,
+                         -- the user's own accounts in bank order: savings, then everyday
+                         CASE WHEN a.is_user_source = 1 THEN a.rowid END,
+                         a.label COLLATE NOCASE
                 """
             ).fetchall()
             transactions = connection.execute(
@@ -685,15 +811,30 @@ class Database:
         }
 
     def resolve_source(self, label: str) -> dict[str, Any] | None:
+        """One of the user's own accounts, by label ("savings", "everyday
+        account") or by position ("my second account"). Anything else is
+        unknown; a source is never guessed."""
+
+        normalized = " ".join(_normalized(label).split())
+        normalized = re.sub(r"^(?:my|the)\s+", "", normalized)
+        normalized = re.sub(r"\s+(?:acc|acct|a/c)$", " account", normalized)
+        bare = re.sub(r"\s+account$", "", normalized)
+        position = _SOURCE_POSITIONS.get(normalized)
         with self._connect() as connection:
+            if position is not None:
+                if position >= len(USER_ACCOUNT_ORDER):
+                    return None
+                where, value = "account_id = ?", USER_ACCOUNT_ORDER[position]
+            else:
+                where, value = "normalized_label = ?", bare
             row = connection.execute(
-                """
+                f"""
                 SELECT account_id, owner_display_name, label, currency,
                        balance_minor
                 FROM accounts
-                WHERE normalized_label = ? AND is_user_source = 1
+                WHERE {where} AND is_user_source = 1
                 """,
-                (_normalized(label),),
+                (value,),
             ).fetchone()
         return dict(row) if row is not None else None
 
@@ -1091,6 +1232,7 @@ class Database:
                     user_id=user_id,
                     executed=execution is not None,
                     now=approved_at,
+                    voice_allowed=row["total_minor"] < VOICE_MAX_MINOR,
                 )
                 if execution is not None:
                     replay = json.loads(execution["response_json"])
@@ -1982,6 +2124,7 @@ class Database:
         user_id: str,
         executed: bool,
         now: datetime,
+        voice_allowed: bool = False,
     ) -> dict[str, Any] | None:
         """Gate every ledger movement on a device signature over this receipt.
 
@@ -2014,6 +2157,9 @@ class Database:
             # Persist the spent challenge: a failed signature burns it.
             raise ReceiptRejected(exc.reason_code, persist_status=True) from None
         # The registered face must have confirmed this exact challenge too.
+        # Under S$200 a spoken confirmation that matched the registered
+        # voiceprint may stand in for the face; the device signature above
+        # is required either way.
         try:
             face = self.face_store.consume(
                 user_id=user_id,
@@ -2022,7 +2168,36 @@ class Database:
                 now=now,
             )
         except FaceRejected as exc:
-            raise ReceiptRejected(exc.reason_code, persist_status=True) from None
+            if not (voice_allowed and exc.reason_code == "FACE_NOT_VERIFIED"):
+                raise ReceiptRejected(exc.reason_code, persist_status=True) from None
+            try:
+                voice = self.voice_store.consume(
+                    user_id=user_id,
+                    challenge_id=assertion.challenge_id,
+                    receipt_digest=receipt_digest,
+                    now=now,
+                )
+            except VoiceRejected as voice_exc:
+                reason = "FACE_NOT_VERIFIED" if voice_exc.reason_code == "VOICE_NOT_VERIFIED" else voice_exc.reason_code
+                raise ReceiptRejected(reason, persist_status=True) from None
+            audit_log.append(
+                connection,
+                "VOICE_MATCH_CONSUMED",
+                {
+                    "sample_id": voice["sample_id"],
+                    "challenge_id": assertion.challenge_id,
+                    "receipt_digest": receipt_digest,
+                    "similarity": voice["similarity"],
+                },
+                now=now,
+                receipt_id=receipt_id,
+            )
+            return {
+                **approval,
+                "confirmed_by": "VOICE",
+                "voice_sample_id": voice["sample_id"],
+                "voice_similarity": voice["similarity"],
+            }
         audit_log.append(
             connection,
             "FACE_MATCH_CONSUMED",
@@ -2037,6 +2212,7 @@ class Database:
         )
         return {
             **approval,
+            "confirmed_by": "FACE",
             "face_scan_id": face["scan_id"],
             "face_similarity": face["similarity"],
         }
@@ -2636,6 +2812,7 @@ class Database:
                 approval = self._require_device_signature(
                     connection, assertion, context, purpose="APPROVE_RECEIPT", receipt_id=order_id,
                     receipt_digest=order_digest, user_id=user_id, executed=False, now=now,
+                    voice_allowed=row["total_minor"] < VOICE_MAX_MINOR,
                 )
                 try:
                     authorisation = singpass.consume(connection, user_id=user_id, order_id=order_id,
@@ -2681,6 +2858,128 @@ class Database:
             ],
             "state": self.get_state(),
             "portfolio": self.investing_overview(user_id),
+        }
+
+    # ------------------------------------------------------------ PayNow payee additions
+    def draft_payee_addition(
+        self, request_id: str, text: str, lookup: Any, nickname: str, user_id: str = DEMO_USER_ID
+    ) -> dict[str, Any]:
+        now = self._clock()
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                addition = payee_additions.draft(
+                    connection, user_id=user_id, request_id=request_id, text=text,
+                    lookup=lookup, nickname=nickname, now=now,
+                )
+            except payee_additions.PayeeAdditionRejected:
+                connection.rollback()
+                raise
+            audit_log.append(
+                connection, "PAYEE_ADDITION_DRAFTED",
+                {"addition_digest": addition["receipt_digest"], "masked_proxy": addition["masked_proxy"],
+                 "masked_name": addition["masked_name"]},
+                now=now, request_id=request_id, receipt_id=addition["addition_id"],
+            )
+            connection.commit()
+            return addition
+
+    def payee_addition_check(self, destination_account_id: str, nickname: str | None) -> None:
+        """Advisory: refuse early when the payee or nickname already exists."""
+
+        with self._connect() as connection:
+            payee_additions.check_not_saved(connection, destination_account_id)
+            if nickname is not None:
+                payee_additions.check_nickname(connection, nickname)
+
+    def issue_payee_addition_challenge(
+        self, addition_id: str, addition_digest: str, *, rp_id: str, user_id: str = DEMO_USER_ID,
+        now: datetime | None = None,
+    ) -> dict[str, Any]:
+        now = now or self._clock()
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                row = payee_additions.awaiting(connection, addition_id, addition_digest, user_id, now)
+                credentials = list_credentials(connection, user_id, rp_id)
+                if not credentials:
+                    raise ReceiptRejected("SIGNING_CREDENTIAL_REQUIRED")
+                challenge = issue_challenge(
+                    connection, purpose="APPROVE_RECEIPT", user_id=user_id, now=now,
+                    receipt_id=addition_id, receipt_digest=addition_digest,
+                )
+                connection.commit()
+            except payee_additions.PayeeAdditionRejected as exc:
+                connection.rollback()
+                raise ReceiptRejected(exc.reason_code) from None
+            except ReceiptRejected:
+                connection.rollback()
+                raise
+        return {**challenge, "allow_credentials": credentials, "review": payee_additions.review(row)}
+
+    def approve_payee_addition(
+        self,
+        addition_id: str,
+        addition_digest: str,
+        user_id: str = DEMO_USER_ID,
+        *,
+        assertion: DeviceAssertion | None,
+        context: ApprovalContext | None,
+        now: datetime | None = None,
+    ) -> dict[str, Any]:
+        """Save the payee only with KYC, the registered face, and a device
+        signature over this exact draft, all checked in the saving transaction."""
+
+        now = now or self._clock()
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                try:
+                    row = payee_additions.awaiting(connection, addition_id, addition_digest, user_id, now)
+                except payee_additions.PayeeAdditionRejected as exc:
+                    if exc.reason_code == "RECEIPT_EXPIRED":
+                        connection.execute(
+                            "UPDATE payee_additions SET status = 'EXPIRED' WHERE addition_id = ?", (addition_id,)
+                        )
+                        raise ReceiptRejected(exc.reason_code, persist_status=True) from None
+                    raise ReceiptRejected(exc.reason_code) from None
+                try:
+                    check_kyc(connection, user_id, now)
+                except PolicyRejected as exc:
+                    raise ReceiptRejected(exc.reason_code) from None
+                approval = self._require_device_signature(
+                    connection, assertion, context, purpose="APPROVE_RECEIPT", receipt_id=addition_id,
+                    receipt_digest=addition_digest, user_id=user_id, executed=False, now=now,
+                )
+                try:
+                    saved = payee_additions.save(connection, row, now)
+                except payee_additions.PayeeAdditionRejected as exc:
+                    raise ReceiptRejected(exc.reason_code, persist_status=True) from None
+                audit_log.append(
+                    connection, "PAYEE_SAVED",
+                    {"beneficiary_id": saved["beneficiary_id"], "origin": "PAYNOW_ADDITION",
+                     "addition_digest": addition_digest},
+                    now=now, receipt_id=addition_id,
+                )
+                connection.commit()
+            except ReceiptRejected as exc:
+                if exc.persist_status:
+                    connection.commit()
+                else:
+                    connection.rollback()
+                raise
+        return {
+            "outcome": "EXECUTED_PAYEE_ADDED",
+            "addition_id": addition_id,
+            "payee": saved,
+            "approval": approval,
+            "trace": [
+                {"stage": "PAYEE_ADDITION_APPROVAL_RECEIVED"},
+                {"stage": "FACE_MATCH_VERIFIED"},
+                {"stage": "DEVICE_SIGNATURE_VERIFIED"},
+                {"stage": "PAYEE_SAVED"},
+            ],
+            "state": self.get_state(),
         }
 
     def start_myinfo(self, user_id: str = DEMO_USER_ID, *, now: datetime | None = None) -> dict[str, Any]:
@@ -2797,6 +3096,211 @@ class Database:
             raise
         self._audit_face_scan("FACE_SCAN_MATCHED", scan, now, receipt_id=challenge["receipt_id"])
         return {"scan_id": scan["scan_id"], "verdict": scan["verdict"], "similarity": scan["similarity"]}
+
+    # ------------------------------------------------------------ voiceprint
+    def voice_status(self, user_id: str = DEMO_USER_ID) -> dict[str, Any]:
+        return self.voice_store.status(user_id)
+
+    @staticmethod
+    def _challenge_amount(connection: sqlite3.Connection, receipt_id: str | None) -> int | None:
+        """What an approval would move, or None when it moves no money
+        (payee additions, voice registration): those always need the face."""
+
+        for query in (
+            "SELECT amount_minor FROM review_receipts WHERE receipt_id = ?",
+            "SELECT total_minor FROM batch_review_receipts WHERE receipt_id = ?",
+            "SELECT total_minor FROM investment_orders WHERE order_id = ?",
+        ):
+            row = connection.execute(query, (receipt_id,)).fetchone()
+            if row is not None:
+                return int(row[0])
+        return None
+
+    def _voice_challenge(self, connection: sqlite3.Connection, challenge_id: str, user_id: str, now: datetime) -> sqlite3.Row:
+        challenge = connection.execute(
+            "SELECT * FROM approval_challenges WHERE challenge_id = ?", (challenge_id,)
+        ).fetchone()
+        if challenge is None or challenge["purpose"] not in {"APPROVE_RECEIPT", "APPROVE_BATCH"}:
+            raise VoiceRejected("APPROVAL_CHALLENGE_UNKNOWN")
+        if challenge["user_id"] != user_id:
+            raise VoiceRejected("APPROVAL_USER_MISMATCH")
+        if challenge["status"] != "ISSUED":
+            raise VoiceRejected("APPROVAL_CHALLENGE_REPLAYED")
+        if now.astimezone(timezone.utc) >= datetime.fromisoformat(challenge["expires_at"]):
+            raise VoiceRejected("APPROVAL_CHALLENGE_EXPIRED")
+        amount = self._challenge_amount(connection, challenge["receipt_id"])
+        if amount is None or amount >= VOICE_MAX_MINOR:
+            raise VoiceRejected("VOICE_NOT_ALLOWED_FOR_THIS_APPROVAL")
+        return challenge
+
+    def issue_voice_phrase(
+        self, challenge_id: str, *, user_id: str = DEMO_USER_ID, now: datetime | None = None
+    ) -> dict[str, Any]:
+        """The one-time digits to say aloud for this approval (under S$200)."""
+
+        now = now or self._clock()
+        with self._connect() as connection:
+            challenge = self._voice_challenge(connection, challenge_id, user_id, now)
+        phrase = self.voice_store.issue_phrase(
+            user_id=user_id, challenge_id=challenge_id, receipt_digest=challenge["receipt_digest"], now=now
+        )
+        return {"challenge_id": challenge_id, "phrase": phrase}
+
+    def verify_voice(
+        self, challenge_id: str, audio: bytes, transcript: str, *, user_id: str = DEMO_USER_ID,
+        now: datetime | None = None,
+    ) -> dict[str, Any]:
+        now = now or self._clock()
+        with self._connect() as connection:
+            challenge = self._voice_challenge(connection, challenge_id, user_id, now)
+        try:
+            sample = self.voice_store.verify(
+                user_id=user_id, challenge_id=challenge_id, receipt_digest=challenge["receipt_digest"],
+                audio=audio, transcript=transcript, now=now,
+            )
+        except VoiceRejected as exc:
+            self._audit_voice("VOICE_SAMPLE_REJECTED", exc.sample, now, receipt_id=challenge["receipt_id"])
+            raise
+        self._audit_voice("VOICE_SAMPLE_MATCHED", sample, now, receipt_id=challenge["receipt_id"])
+        return {"sample_id": sample["sample_id"], "verdict": sample["verdict"], "similarity": sample["similarity"]}
+
+    def _audit_voice(self, event_type: str, sample: dict[str, Any] | None, now: datetime, *, receipt_id: str | None = None) -> None:
+        if sample is None:
+            return
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            audit_log.append(
+                connection, event_type,
+                {key: sample.get(key) for key in (
+                    "sample_id", "purpose", "challenge_id", "receipt_digest", "similarity",
+                    "phrase_expected", "phrase_heard", "verdict", "reason_code", "audio_sha256", "seconds",
+                )},
+                now=now, receipt_id=receipt_id,
+            )
+            connection.commit()
+
+    def start_voice_enrollment(self, user_id: str = DEMO_USER_ID, *, now: datetime | None = None) -> dict[str, Any]:
+        """Registering a voice needs a verified identity and a registered face,
+        because the registration itself is approved with the face."""
+
+        now = now or self._clock()
+        with self._connect() as connection:
+            try:
+                check_kyc(connection, user_id, now)
+            except PolicyRejected as exc:
+                raise VoiceRejected(exc.reason_code) from None
+        if not self.face_store.status(user_id)["face_registered"]:
+            raise VoiceRejected("FACE_NOT_REGISTERED")
+        self.voice_store.engine()
+        return self.voice_store.start_enrollment(user_id, now)
+
+    def add_voice_enrollment_sample(
+        self, enrollment_id: str, audio: bytes, *, user_id: str = DEMO_USER_ID, now: datetime | None = None
+    ) -> dict[str, Any]:
+        return self.voice_store.add_enrollment_sample(
+            user_id=user_id, enrollment_id=enrollment_id, audio=audio, now=now or self._clock()
+        )
+
+    def issue_voice_enrollment_challenge(
+        self, enrollment_id: str, enrollment_digest: str, *, rp_id: str, user_id: str = DEMO_USER_ID,
+        now: datetime | None = None,
+    ) -> dict[str, Any]:
+        now = now or self._clock()
+        try:
+            enrollment = self.voice_store.awaiting_enrollment(enrollment_id, enrollment_digest, user_id, now)
+        except VoiceRejected as exc:
+            raise ReceiptRejected(exc.reason_code) from None
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            credentials = list_credentials(connection, user_id, rp_id)
+            if not credentials:
+                connection.rollback()
+                raise ReceiptRejected("SIGNING_CREDENTIAL_REQUIRED")
+            challenge = issue_challenge(
+                connection, purpose="APPROVE_RECEIPT", user_id=user_id, now=now,
+                receipt_id=enrollment_id, receipt_digest=enrollment_digest,
+            )
+            connection.commit()
+        review = {
+            "kind": "VOICE",
+            "receipt_id": enrollment_id,
+            "receipt_digest": enrollment_digest,
+            "source_label": "—",
+            "currency": "SGD",
+            "total_minor": 0,
+            "items": [{
+                "recipient_display_name": "Register your voiceprint",
+                "masked_destination": f"{enrollment['sample_count']} recordings · voice can confirm payments under S$200",
+                "amount_minor": 0,
+            }],
+            "receipt_expires_at": enrollment["expires_at"],
+            "validation": {"verdict": "PASS", "fields": [],
+                           "note": "A new way to confirm payments, so it must be approved with your face and device."},
+            "requires_out_of_band": False,
+            "requires_read_back": False,
+            "requires_unusual_confirmation": False,
+            "read_back": {"text": "Register your voice to confirm payments under two hundred dollars. "
+                                  "Larger payments will still need your face.", "audio_artifact_id": None},
+        }
+        return {**challenge, "allow_credentials": credentials, "review": review}
+
+    def approve_voice_enrollment(
+        self,
+        enrollment_id: str,
+        enrollment_digest: str,
+        user_id: str = DEMO_USER_ID,
+        *,
+        assertion: DeviceAssertion | None,
+        context: ApprovalContext | None,
+        now: datetime | None = None,
+    ) -> dict[str, Any]:
+        now = now or self._clock()
+        try:
+            self.voice_store.awaiting_enrollment(enrollment_id, enrollment_digest, user_id, now)
+        except VoiceRejected as exc:
+            raise ReceiptRejected(exc.reason_code) from None
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                try:
+                    check_kyc(connection, user_id, now)
+                except PolicyRejected as exc:
+                    raise ReceiptRejected(exc.reason_code) from None
+                # Face and device only: a voice can never approve its own registration.
+                approval = self._require_device_signature(
+                    connection, assertion, context, purpose="APPROVE_RECEIPT", receipt_id=enrollment_id,
+                    receipt_digest=enrollment_digest, user_id=user_id, executed=False, now=now,
+                )
+                try:
+                    registered = self.voice_store.activate(
+                        enrollment_id=enrollment_id, digest=enrollment_digest, user_id=user_id, now=now
+                    )
+                except VoiceRejected as exc:
+                    raise ReceiptRejected(exc.reason_code, persist_status=True) from None
+                audit_log.append(
+                    connection, "VOICEPRINT_REGISTERED",
+                    {"enrollment_id": enrollment_id, "template_sha256": registered["template_sha256"]},
+                    now=now, receipt_id=enrollment_id,
+                )
+                connection.commit()
+            except ReceiptRejected as exc:
+                if exc.persist_status:
+                    connection.commit()
+                else:
+                    connection.rollback()
+                raise
+        return {
+            "outcome": "EXECUTED_VOICE_REGISTERED",
+            "approval": approval,
+            "voice": self.voice_store.status(user_id),
+            "trace": [
+                {"stage": "VOICE_REGISTRATION_APPROVAL_RECEIVED"},
+                {"stage": "FACE_MATCH_VERIFIED"},
+                {"stage": "DEVICE_SIGNATURE_VERIFIED"},
+                {"stage": "VOICEPRINT_REGISTERED"},
+            ],
+            "state": self.get_state(),
+        }
 
     def _audit_face_scan(
         self, event_type: str, scan: dict[str, Any] | None, now: datetime, *, receipt_id: str | None = None
@@ -2993,6 +3497,7 @@ class Database:
                     user_id=user_id,
                     executed=executed,
                     now=approved_at,
+                    voice_allowed=receipt["amount_minor"] < VOICE_MAX_MINOR,
                 )
                 response = self._execute_stored_receipt(
                     connection,

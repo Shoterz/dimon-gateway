@@ -40,6 +40,17 @@ class DimonServeCliTests(unittest.TestCase):
 
         popen.assert_not_called()
 
+    def test_workers_scale_out_across_processes(self) -> None:
+        runner = Mock()
+
+        main(environ={"DIMON_WORKERS": "4"}, runner=runner)
+
+        runner.assert_called_once_with(
+            "apps.dimon_live.app:app", host="127.0.0.1", port=8890, workers=4,
+        )
+        with self.assertRaisesRegex(ValueError, "DIMON_WORKERS"):
+            main(environ={"DIMON_WORKERS": "0"}, runner=Mock())
+
     def test_rejects_an_invalid_port_before_starting(self) -> None:
         runner = Mock()
 

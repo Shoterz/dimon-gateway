@@ -1,0 +1,12 @@
+{
+  "contract_version": 3,
+  "kind": "PAYNOW_MOBILE_TRANSFER",
+  "source_account_ref": "savings",
+  "source_evidence": "savings",
+  "mobile_proxy": "86952938",
+  "proxy_evidence": "8695 2938",
+  "currency": "SGD",
+  "payment_reference": null,
+  "reference_evidence": null,
+  "requested_execution_date": null
+}

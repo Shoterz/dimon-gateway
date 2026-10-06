@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import Mapping
+from dataclasses import replace
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -30,6 +31,7 @@ from .remote_inference import (
 )
 from .voice import NemotronClient, NemotronLifecycleClient
 from .intel_voice import WhisperClient
+from . import trtc
 
 
 _LOCAL_DEFAULTS = {
@@ -41,7 +43,7 @@ _LOCAL_DEFAULTS = {
     "DIMON_WHISPER_CPP_URL": "ws://127.0.0.1:8006/v1/stream",
 }
 
-_STT_BACKENDS = {"nemotron", "whisper_intel", "whisper_cpp"}
+_STT_BACKENDS = {"nemotron", "whisper_intel", "whisper_cpp", "trtc"}
 
 
 def _value(env: Mapping[str, str], key: str) -> str:
@@ -66,6 +68,25 @@ def _endpoint(env: Mapping[str, str], key: str, schemes: set[str]) -> str:
 
 
 def build_inference_providers(
+    mode: str,
+    env: Mapping[str, str],
+) -> InferenceProviders:
+    providers = _build_providers(mode, env)
+    # TRTC cloud ASR can replace speech recognition in any mode, so fixture
+    # and remote setups can hear real speech without a GPU host.
+    if env.get("DIMON_STT_BACKEND", "").strip().lower() == "trtc":
+        try:
+            recognizer = trtc.asr_from_env(env)
+        except (TypeError, ValueError) as exc:
+            raise ProviderConfigurationError(
+                "INVALID_TRTC_CONFIG",
+                "DIMON_STT_BACKEND=trtc needs DIMON_TRTC_SDK_APP_ID and DIMON_TRTC_SDK_SECRET_KEY",
+            ) from exc
+        providers = replace(providers, recognizer=recognizer, voice_lifecycle=None)
+    return providers
+
+
+def _build_providers(
     mode: str,
     env: Mapping[str, str],
 ) -> InferenceProviders:
@@ -110,7 +131,7 @@ def build_inference_providers(
     if stt_backend not in _STT_BACKENDS:
         raise ProviderConfigurationError(
             "INVALID_LOCAL_INFERENCE_CONFIG",
-            "DIMON_STT_BACKEND must be nemotron, whisper_intel, or whisper_cpp",
+            "DIMON_STT_BACKEND must be nemotron, whisper_intel, whisper_cpp, or trtc",
         )
 
     try:
@@ -125,6 +146,8 @@ def build_inference_providers(
             whisper_url = _endpoint(env, "DIMON_WHISPER_CPP_URL", {"ws", "wss"})
             whisper_connect_timeout = float(env.get("DIMON_WHISPER_CPP_CONNECT_TIMEOUT", "3"))
             whisper_result_timeout = float(env.get("DIMON_WHISPER_CPP_RESULT_TIMEOUT", "90"))
+        elif stt_backend == "trtc":
+            pass  # the recognizer is swapped in by build_inference_providers
         else:
             nemotron_url = _endpoint(env, "DIMON_NEMOTRON_URL", {"ws", "wss"})
             connect_timeout = float(env.get("DIMON_NEMOTRON_CONNECT_TIMEOUT", "3"))
@@ -156,6 +179,9 @@ def build_inference_providers(
             connect_timeout=whisper_connect_timeout,
             result_timeout=whisper_result_timeout,
         )
+        voice_lifecycle = None
+    elif stt_backend == "trtc":
+        recognizer = None  # replaced by build_inference_providers
         voice_lifecycle = None
     else:
         recognizer = NemotronClient(

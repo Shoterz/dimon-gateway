@@ -72,7 +72,7 @@ if ($Mode -eq "auto") {
     } else {
         Write-Host ""
         Write-Host "  How do you want to run Dimon?" -ForegroundColor White
-        Write-Host "    [1] Demo mode  - ready in about a minute, scripted AI responses (only the 39 MB face models download)."
+        Write-Host "    [1] Demo mode  - ready in about a minute, scripted AI responses (only the 65 MB face and voice models download)."
         Write-Host "    [2] Local AI   - real speech and language models on this PC (~9 GB download)."
         $choice = Read-Host "  Choose 1 or 2 (default 1)"
         $Mode = if ($choice -eq "2") { "local" } else { "demo" }
@@ -196,6 +196,14 @@ foreach ($name in "FaceDetector", "FaceRecognizer") {
     Get-VerifiedFile $artifact $destination $name
     $settings[$(if ($name -eq "FaceDetector") { "DIMON_FACE_DETECTOR_PATH" } else { "DIMON_FACE_RECOGNIZER_PATH" })] = $destination
 }
+
+# ------------------------------------------------------ voice confirmation
+# The voiceprint model lets a registered voice confirm payments under S$200.
+Write-Step "Downloading the voiceprint model (about 27 MB)"
+$artifact = $artifacts.VoiceModels["SpeakerEmbedding"]
+$destination = Join-Path $installRoot $artifact.File
+Get-VerifiedFile $artifact $destination "SpeakerEmbedding"
+$settings["DIMON_SPEAKER_MODEL_PATH"] = $destination
 
 Set-DotEnvValues $settings
 Write-Ok "Settings written to apps\dimon_live\.env"

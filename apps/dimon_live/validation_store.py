@@ -99,7 +99,9 @@ def audit_stored_receipt(
     ]
     source_labels = [
         account["label"]
-        for account in connection.execute("SELECT label FROM accounts WHERE is_user_source = 1")
+        # rowid order is the bank's account order (savings first), which
+        # "my first/second account" refers to.
+        for account in connection.execute("SELECT label FROM accounts WHERE is_user_source = 1 ORDER BY rowid")
     ]
     report = audit_draft(
         _utterances(row),

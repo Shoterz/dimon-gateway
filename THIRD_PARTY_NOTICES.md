@@ -17,6 +17,7 @@ checksums, byte sizes, and license sources during the GPU-host checkpoint.
 | Huihui Qwen3.5 GGUF used by the current host | [model repository](https://huggingface.co/mradermacher/Huihui-Qwen3.5-9B-abliterated-GGUF) | Verify the repository model card and the base-model terms. |
 | NVIDIA Nemotron/NeMo speech runtime | [NVIDIA NeMo](https://github.com/NVIDIA-NeMo/NeMo) | See the repository license and the selected speech-model card. |
 | Kokoro 82M | [hexgrad/Kokoro-82M](https://huggingface.co/hexgrad/Kokoro-82M) | See the model card and files for the pinned revision. |
+| WeSpeaker ResNet34 (VoxCeleb) speaker embedding, used for voiceprints | [Wespeaker/wespeaker-voxceleb-resnet34-LM](https://huggingface.co/Wespeaker/wespeaker-voxceleb-resnet34-LM) | CC BY 4.0. © WeSpeaker contributors; downloaded unmodified at a pinned revision, not redistributed in this repository. |
 | llama.cpp | [ggerganov/llama.cpp](https://github.com/ggml-org/llama.cpp) | See the upstream `LICENSE`. |
 
 ## Python dependencies

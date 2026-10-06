@@ -42,21 +42,28 @@ def sign_request(
     payload: bytes,
     timestamp: int,
     region: str,
+    host: str = HOST,
+    service: str = SERVICE,
+    action: str = ACTION,
+    version: str = VERSION,
 ) -> dict[str, str]:
-    """Headers for a TC3-HMAC-SHA256 signed TextToVoice call."""
+    """Headers for a TC3-HMAC-SHA256 signed Tencent Cloud API call.
+
+    The defaults sign a TextToVoice call; trtc.py reuses this for TRTC APIs.
+    """
 
     date = time.strftime("%Y-%m-%d", time.gmtime(timestamp))
     content_type = "application/json; charset=utf-8"
-    canonical_headers = f"content-type:{content_type}\nhost:{HOST}\nx-tc-action:{ACTION.lower()}\n"
+    canonical_headers = f"content-type:{content_type}\nhost:{host}\nx-tc-action:{action.lower()}\n"
     signed_headers = "content-type;host;x-tc-action"
     canonical_request = "\n".join(
         ("POST", "/", "", canonical_headers, signed_headers, _sha256_hex(payload))
     )
-    scope = f"{date}/{SERVICE}/tc3_request"
+    scope = f"{date}/{service}/tc3_request"
     string_to_sign = "\n".join(
         ("TC3-HMAC-SHA256", str(timestamp), scope, _sha256_hex(canonical_request.encode("utf-8")))
     )
-    signing_key = _hmac(_hmac(_hmac(f"TC3{secret_key}".encode("utf-8"), date), SERVICE), "tc3_request")
+    signing_key = _hmac(_hmac(_hmac(f"TC3{secret_key}".encode("utf-8"), date), service), "tc3_request")
     signature = hmac.new(signing_key, string_to_sign.encode("utf-8"), hashlib.sha256).hexdigest()
     return {
         "Authorization": (
@@ -64,10 +71,10 @@ def sign_request(
             f"SignedHeaders={signed_headers}, Signature={signature}"
         ),
         "Content-Type": content_type,
-        "Host": HOST,
-        "X-TC-Action": ACTION,
+        "Host": host,
+        "X-TC-Action": action,
         "X-TC-Timestamp": str(timestamp),
-        "X-TC-Version": VERSION,
+        "X-TC-Version": version,
         "X-TC-Region": region,
     }
 
@@ -140,7 +147,12 @@ class FallbackSynthesizer:
 
 
 def read_back_synthesizer_from_env(env: Mapping[str, str], default):
-    if env.get("DIMON_TTS_PROVIDER", "").strip().lower() != "tencent":
+    provider = env.get("DIMON_TTS_PROVIDER", "").strip().lower()
+    if provider == "trtc":
+        from .trtc import tts_from_env
+
+        return FallbackSynthesizer(tts_from_env(env), default)
+    if provider != "tencent":
         return None
     tencent = TencentTtsSynthesizer(
         secret_id=env.get("DIMON_TENCENT_SECRET_ID", ""),

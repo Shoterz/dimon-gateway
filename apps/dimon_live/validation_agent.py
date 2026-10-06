@@ -127,6 +127,9 @@ def transcript_amounts(text: str) -> set[int]:
     return amounts
 
 
+_ACCOUNT_POSITION = re.compile(r"(?<![\w])(first|1st|primary|main|second|2nd) (?:account|acc|acct|a/c)(?![\w])")
+
+
 def _mentions(text: str, phrase: str) -> bool:
     phrase = normalize(phrase)
     return bool(phrase) and re.search(rf"(?<![\w]){re.escape(phrase)}(?![\w])", text) is not None
@@ -231,7 +234,13 @@ def audit_draft(
         fields.append(FieldAudit("currency", "MATCH", "SGD", "SGD", "Singapore dollars"))
 
     named_sources = [label for label in source_labels if _mentions(text, label)]
-    if _mentions(text, draft.source_label):
+    # "my second account" names an account by its place in source_labels,
+    # which the store lists in the bank's own order (savings first).
+    for match in _ACCOUNT_POSITION.finditer(text):
+        position = 0 if match.group(1) in {"first", "1st", "primary", "main"} else 1
+        if position < len(source_labels) and source_labels[position] not in named_sources:
+            named_sources.append(source_labels[position])
+    if _mentions(text, draft.source_label) or named_sources == [draft.source_label]:
         fields.append(FieldAudit("source_account", "MATCH", draft.source_label, draft.source_label, "source account stated"))
     elif named_sources:
         fields.append(FieldAudit("source_account", "MISMATCH", draft.source_label, ", ".join(named_sources), "the user named a different source account"))

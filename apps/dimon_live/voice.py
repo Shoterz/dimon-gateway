@@ -178,24 +178,30 @@ class VoiceTurnDetector:
 
 
 class VoiceLease:
-    """A process-wide, non-queued lease for the single local speech model."""
+    """A non-queued lease on the speech recogniser.
 
-    def __init__(self):
-        self._lock = asyncio.Lock()
+    A local model on one GPU serves one utterance at a time (capacity 1). A
+    cloud recogniser such as TRTC scales out, so its capacity is set by
+    DIMON_VOICE_CONCURRENCY instead of capping the whole server at one user.
+    """
+
+    def __init__(self, capacity: int = 1):
+        self.capacity = max(1, int(capacity))
+        self._active = 0
 
     @property
     def active_count(self) -> int:
-        return int(self._lock.locked())
+        return self._active
 
     async def acquire(self) -> bool:
-        if self._lock.locked():
+        if self._active >= self.capacity:
             return False
-        await self._lock.acquire()
+        self._active += 1
         return True
 
     def release(self) -> None:
-        if self._lock.locked():
-            self._lock.release()
+        if self._active > 0:
+            self._active -= 1
 
 
 def float32le_to_pcm16(audio: bytes) -> bytes:

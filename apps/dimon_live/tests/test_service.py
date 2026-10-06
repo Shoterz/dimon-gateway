@@ -16,6 +16,7 @@ from apps.dimon_live.model_adapter import (
 
 REQUEST_ID = "00000000-0000-4000-8000-000000000010"
 GOLDEN_REQUEST = "Send John Smith S$50 from savings."
+MODEL_ONLY_REQUEST = "I owe John Smith S$50, please settle it from savings."
 GOLDEN_INTENT = {
     "contract_version": 2,
     "kind": "BENEFICIARY_TRANSFER",
@@ -103,7 +104,7 @@ class RaisingExtractor:
 class ActionServiceTests(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
-        self.database = Database(Path(self.temp_dir.name) / "demo.sqlite3")
+        self.database = Database(Path(self.temp_dir.name) / "demo.sqlite3", single_account=True)
         self.database.initialize()
         self.device = SoftwareAuthenticator()
         self.device.enroll(self.database)
@@ -1280,7 +1281,8 @@ class ActionServiceTests(unittest.TestCase):
             RaisingExtractor(InvalidModelOutput("bad JSON")),
         )
 
-        result = service.process(REQUEST_ID, GOLDEN_REQUEST)
+        # Phrased so the plain-transfer rules leave it to the model.
+        result = service.process(REQUEST_ID, MODEL_ONLY_REQUEST)
 
         self.assertEqual(
             (result["outcome"], result["reason_code"]),
@@ -1297,7 +1299,8 @@ class ActionServiceTests(unittest.TestCase):
             RaisingExtractor(ModelUnavailable("timeout")),
         )
 
-        result = service.process(REQUEST_ID, GOLDEN_REQUEST)
+        # Phrased so the plain-transfer rules leave it to the model.
+        result = service.process(REQUEST_ID, MODEL_ONLY_REQUEST)
 
         self.assertEqual(
             (result["outcome"], result["reason_code"]),

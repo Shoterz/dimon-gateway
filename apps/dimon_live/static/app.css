@@ -377,3 +377,37 @@ button:focus-visible, textarea:focus-visible, a:focus-visible { outline: 2px sol
 }
 .approval-cancel:focus-visible, .approval-confirm:focus-visible { outline: 2px solid var(--amber); outline-offset: 2px; }
 @media (prefers-reduced-motion: reduce) { .approval-confirm { transition: none; } }
+/* Ask Dimon: live TRTC voice assistant */
+.assistant-panel { border: 1px solid var(--line); padding: 14px; background: var(--mineral); }
+.assistant-panel .voice-row { padding: 4px 0 0; }
+.assistant-intro { margin: 0 0 8px; color: var(--muted); font-size: 12px; line-height: 1.5; }
+.assistant-log { max-height: 220px; overflow-y: auto; margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--line); display: grid; gap: 6px; }
+.assistant-line { margin: 0; font-size: 13px; line-height: 1.45; }
+.assistant-line span { display: inline-block; min-width: 52px; color: var(--muted); font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; }
+.assistant-line.dimon span { color: var(--signal); }
+.assistant-line.interim { opacity: .6; }
+
+/* Several requests in one sentence */
+.plan-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-bottom: 12px; padding-bottom: 10px; border-bottom: 1px solid var(--line); font-size: 11px; color: var(--muted); }
+.plan-bar button { border: 1px solid var(--line); background: transparent; color: var(--paper); padding: 4px 8px; font-size: 11px; }
+.plan-bar .plan-dot { width: 26px; padding: 4px 0; }
+.plan-bar .plan-dot.done { border-color: var(--settled); color: var(--settled); }
+.plan-bar .plan-dot.stopped { border-color: var(--coral); color: var(--coral); }
+.plan-bar .plan-dot.current { background: rgba(120,224,207,.16); border-color: var(--signal); }
+.plan-bar .plan-next { margin-left: auto; border-color: var(--signal); color: var(--signal); }
+.plan-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+.plan-step { display: grid; grid-template-columns: 28px 1fr auto; gap: 4px 10px; align-items: start; padding: 10px; border: 1px solid var(--line); background: var(--mineral); }
+.plan-step strong { font-size: 13px; overflow-wrap: anywhere; }
+.plan-step p { margin: 3px 0 0; color: var(--muted); font-size: 12px; line-height: 1.45; }
+.plan-step .candidate-choice { grid-column: 2 / -1; justify-self: start; }
+.plan-number { display: grid; place-items: center; width: 24px; height: 24px; border: 1px solid var(--line); font-size: 11px; font-weight: 700; }
+.plan-status { font-size: 11px; font-weight: 700; color: var(--amber); }
+.plan-step.done .plan-status { color: var(--settled); }
+.plan-step.stopped .plan-status { color: var(--coral); }
+.nickname-form { display: flex; gap: 8px; flex-wrap: wrap; }
+.nickname-form input { flex: 1 1 160px; min-height: 40px; padding: 8px 10px; border: 1px solid var(--line); background: var(--ink); color: var(--paper); font: inherit; }
+
+/* Hands-free: the one-time phrase to say aloud */
+#hands-free-panel .voice-row + .voice-row { padding-top: 8px; }
+#hands-free-panel .voice-status { white-space: normal; }
+.voice-phrase { font-family: ui-monospace, monospace; font-size: clamp(32px, 7vw, 48px); letter-spacing: .35em; color: var(--signal); }

@@ -40,6 +40,7 @@ class PublicBoundaryTests(unittest.TestCase):
         )
 
     def tearDown(self):
+        self.app.state.session_manager.close()
         self.temp_dir.cleanup()
 
     def request(self, method, path, **kwargs):

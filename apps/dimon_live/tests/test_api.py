@@ -73,6 +73,10 @@ class DimonLiveApiTests(unittest.TestCase):
             extractor=self.extractor,
             face_engine=FakeFaceEngine(),
         )
+        # One-account ledger; two accounts are covered in test_multi_intent.py.
+        database = self.app.state.database
+        database.single_account = True
+        database.reset()
 
     def tearDown(self):
         self.temp_dir.cleanup()

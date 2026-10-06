@@ -51,6 +51,7 @@ class SessionIsolationTests(unittest.TestCase):
         )
 
     def tearDown(self):
+        self.manager.close()
         self.temp_dir.cleanup()
 
     def test_two_visitors_get_independent_seeded_databases(self):
@@ -109,6 +110,7 @@ class SessionIsolationTests(unittest.TestCase):
         )
         self.assertEqual(context.role, "visitor")
         self.assertNotEqual(context.database.path, manager.owner_path)
+        manager.close()
 
 
 class SessionApiTests(unittest.TestCase):
@@ -139,6 +141,8 @@ class SessionApiTests(unittest.TestCase):
             self.assertEqual(one.status_code, 200)
             self.assertEqual(two.status_code, 200)
         finally:
+            if "app" in locals():
+                app.state.session_manager.close()
             temp_dir.cleanup()
 
     def test_transfer_in_visitor_a_does_not_change_visitor_b_or_owner(self):
@@ -221,6 +225,8 @@ class SessionApiTests(unittest.TestCase):
             self.assertEqual(other.json()["accounts"][0]["balance_minor"], 100000)
             self.assertFalse((Path(temp_dir.name) / "owner.sqlite3").exists())
         finally:
+            if "app" in locals():
+                app.state.session_manager.close()
             temp_dir.cleanup()
 
 

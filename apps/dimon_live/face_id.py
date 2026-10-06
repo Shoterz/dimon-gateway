@@ -201,6 +201,7 @@ class FaceStore:
     def __init__(self, path: Path, engine: Callable[[], FaceEngine | None]):
         self.path = Path(path)
         self._engine = engine
+        self._ready = False   # schema created by this process already
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
@@ -209,7 +210,9 @@ class FaceStore:
         try:
             connection.row_factory = sqlite3.Row
             connection.execute("PRAGMA busy_timeout = 3000")
-            connection.executescript(FACE_SCHEMA)
+            if not self._ready:
+                connection.executescript(FACE_SCHEMA)
+                self._ready = True
             yield connection
         finally:
             connection.close()

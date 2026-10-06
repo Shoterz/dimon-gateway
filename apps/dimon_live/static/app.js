@@ -12,6 +12,9 @@ import {
   VoiceFrameResampler,
 } from "./voice_capture.mjs";
 import {describeVoiceFailure, reportVoiceFailure} from "./voice_failure.mjs";
+import { initTrtcAssistant } from "./trtc_assistant.mjs";
+import * as multiRequest from "./multi_request.mjs";
+import { initHandsFree } from "./hands_free.mjs";
 
 const ui = {
   accountList: document.querySelector("#account-list"),
@@ -29,6 +32,7 @@ const ui = {
   outcomeDetail: document.querySelector("#outcome-detail"),
   resultAudio: document.querySelector("#result-audio"),
   candidateList: document.querySelector("#candidate-list"),
+  planBar: document.querySelector("#plan-bar"),
   traceList: document.querySelector("#trace-list"),
   elapsedLabel: document.querySelector("#elapsed-label"),
   ledgerBody: document.querySelector("#ledger-body"),
@@ -266,6 +270,16 @@ const stageCopy = {
   PHONETIC_RECIPIENT_MATCH: ["Possible phonetic match", "Confirmation required"],
   UNGROUNDED_AMOUNT: ["Amount rejected", "No verbatim evidence"],
   AMOUNT_EVIDENCE_MISMATCH: ["Amount rejected", "Evidence and value differ"],
+  MULTIPLE_REQUESTS_FOUND: ["Several requests found", "Each part is checked and approved on its own"],
+  MULTIPLE_REQUESTS: ["Requests drafted separately", "No part can approve another"],
+  RULE_PARSER_MATCHED: ["Plain transfer understood", "Fixed rules · the AI was not needed"],
+  PAYEE_ADDITION_UNDERSTOOD: ["Add PayNow payee", "Fixed rules · the AI took no part"],
+  PAYEE_ADDITION_DRAFTED: ["Payee draft stored", "Saving needs your face and device"],
+  PAYEE_NICKNAME_REQUIRED: ["Name needed", "Choose what to call this payee"],
+  MISSING_SOURCE_ACCOUNT: ["Account needed", "Choose which account pays"],
+  VOICE_MATCH_CONSUMED: ["Voice confirmed", "Matched your voiceprint and the one-time phrase"],
+  VOICE_REGISTRATION_APPROVAL_RECEIVED: ["Voice registration", "Approved with face and device"],
+  VOICEPRINT_REGISTERED: ["Voiceprint registered", "Voice can confirm payments under S$200"],
 };
 
 function renderTrace(trace, outcome) {
@@ -280,7 +294,12 @@ function renderTrace(trace, outcome) {
   }).join("");
 }
 
+function renderPlanBar() {
+  multiRequest.renderBar(ui.planBar, escapeHtml, openPlanStep, showPlan);
+}
+
 function setOutcome(kind, index, kicker, title, detail) {
+  ui.outcomeTitle.classList.remove("voice-phrase");
   ui.outcomePanel.className = `outcome-panel ${kind}`;
   ui.outcomeIndex.textContent = index;
   ui.outcomeKicker.textContent = kicker;
@@ -356,7 +375,9 @@ function approvalLabel(result) {
   const kind = result.approval?.credential_kind;
   const face = result.approval?.face_similarity != null
     ? `Your face (${Math.round(result.approval.face_similarity * 100)}% match) + `
-    : "";
+    : result.approval?.voice_similarity != null
+      ? `Your voice (${Math.round(result.approval.voice_similarity * 100)}% match) + `
+      : "";
   const singpass = result.approval?.singpass_auth_id ? "Singpass + " : "";
   if (singpass) return `${singpass}${face}${kind === "WEBAUTHN_PLATFORM" ? "Windows Hello" : "this device's key"}`;
   if (kind === "WEBAUTHN_PLATFORM") return `${face}Windows Hello / Touch ID`;
@@ -618,18 +639,19 @@ function confirmOnDevice(challenge, signerKind) {
   const signer = describeSigner(signerKind);
   ui.approvalItems.innerHTML = review.items.map(item => `<div class="approval-item">
       <span><small>To</small><strong>${escapeHtml(item.recipient_display_name)}</strong>${item.masked_destination ? `<em>${escapeHtml(item.masked_destination)}</em>` : ""}${item.new_payee ? '<b class="payee-flag">New payee</b>' : ""}</span>
-      <span><small>Amount</small><strong>${escapeHtml(formatSgd(item.amount_minor))}</strong>${item.unusual_amount ? '<b class="payee-flag">Unusual amount</b>' : ""}</span>
+      <span><small>Amount</small><strong>${review.kind === "PAYEE" ? "No money moves" : escapeHtml(formatSgd(item.amount_minor))}</strong>${item.unusual_amount ? '<b class="payee-flag">Unusual amount</b>' : ""}</span>
     </div>`).join("");
   ui.approvalSource.textContent = review.source_label || "—";
   ui.approvalTotal.textContent = formatSgd(review.total_minor);
   ui.approvalDigest.textContent = `${review.receipt_digest.slice(0, 16)}…`;
   ui.approvalMethod.textContent = signer.label;
-  const unverified = review.kind === "ORDER" ? [] : (review.validation?.fields || []).filter(field => field.verdict !== "MATCH");
+  const fixedRules = review.kind === "ORDER" || review.kind === "PAYEE";
+  const unverified = fixedRules ? [] : (review.validation?.fields || []).filter(field => field.verdict !== "MATCH");
   ui.approvalValidation.className = unverified.length ? "approval-validation attention" : "approval-validation pass";
   ui.approvalValidation.innerHTML = unverified.length
     ? `<strong>Independent validator could not confirm ${unverified.length === 1 ? "this field" : "these fields"} from your words — check before signing:</strong>
        <ul>${unverified.map(field => `<li>${escapeHtml(field.field.replace(/^items\[\d+\]\./, ""))}: ${escapeHtml(field.draft_value)} — ${escapeHtml(field.note)}</li>`).join("")}</ul>`
-    : review.kind === "ORDER"
+    : fixedRules
       ? `<strong>${escapeHtml(review.validation.note)}</strong>`
       : "<strong>Independent validator: every field matches your words.</strong>";
   ui.approvalConfirm.textContent = signer.action;
@@ -915,7 +937,50 @@ async function waitForResultAudio(artifactId, generation) {
   }
 }
 
+function requestPayeeAdditionApproval(addition, signed) {
+  return fetch(`/api/payee-additions/${addition.receipt_id}/approve`, {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({receipt_digest: addition.receipt_digest, ...signed}),
+  }).then(async response => response.ok
+    ? {kind: "RESULT", result: await response.json()}
+    : {kind: "UNKNOWN", message: `Gateway returned HTTP ${response.status}`})
+    .catch(error => ({kind: "UNKNOWN", message: error instanceof Error ? error.message : String(error)}));
+}
+
+function approvePayeeAddition(addition) {
+  return signedApproval(
+    "payee-additions",
+    addition,
+    requestPayeeAdditionApproval,
+    "Retry this exact payee draft to retrieve its stored result; it can be saved at most once.",
+  );
+}
+
+// Follow-ups add the user's own words to the request they belong to and
+// re-run it through the full pipeline ("... from everyday", "... as Uncle Tan").
+function followUpCommand(extra) {
+  const base = multiRequest.activeStepText() || lastCommandText;
+  multiRequest.markFollowUp();
+  runCommand(`${base.replace(/[.!\s]+$/, "")} ${extra}`);
+}
+
+function openPlanStep(index) {
+  const result = multiRequest.openStep(index);
+  if (result) renderResult(result, 0);
+}
+
+function showPlan() {
+  multiRequest.closeStep();
+  ui.planBar.hidden = true;
+  setOutcome("clarification", "≡", "Several requests · each approved on its own",
+    "Review each request.", "Nothing has moved. Each request has its own receipt or question, and signing one never signs another.");
+  multiRequest.renderList(ui.candidateList, escapeHtml, openPlanStep);
+}
+
 function renderResult(result, elapsedMs) {
+  multiRequest.observe(result);
+  renderPlanBar();
   renderState(result.state);
   renderTrace(result.trace || [], result.outcome);
   renderCommit(result);
@@ -930,7 +995,52 @@ function renderResult(result, elapsedMs) {
     ui.resultAudio.hidden = true;
   }
   ui.elapsedLabel.textContent = `${elapsedMs} ms end to end`;
-  if (result.outcome === "EXECUTED_SYNTHETIC_TRANSFER") {
+  if (result.outcome === "MULTI_REQUEST") {
+    multiRequest.startPlan(result);
+    showPlan();
+    ui.outcomeDetail.textContent = `${result.question} Nothing has moved; signing one request never signs another.`;
+  } else if (result.outcome === "PAYEE_ADDITION_REQUEST") {
+    const addition = result.payee_addition;
+    setOutcome("clarification", "+", "New PayNow payee · confirm with your face", result.question,
+      "No money moves. After saving, payments to this payee need a one-time code for 24 hours.");
+    ui.candidateList.hidden = false;
+    ui.candidateList.innerHTML = `<article class="receipt-choice">
+      <p class="match-label">PayNow · directory verified</p>
+      <div class="receipt-facts">
+        <span><small>Save as</small><strong>${escapeHtml(addition.nickname)}</strong></span>
+        <span><small>Registered name</small><strong>${escapeHtml(addition.masked_name)}</strong></span>
+        <span><small>Number</small><strong>${escapeHtml(addition.masked_proxy)}</strong></span>
+      </div>
+      <button type="button" class="candidate-choice">Review &amp; save payee</button>
+    </article>`;
+    ui.candidateList.querySelector(".candidate-choice").addEventListener("click", () => approvePayeeAddition(addition));
+  } else if (result.outcome === "EXECUTED_VOICE_REGISTERED") {
+    setOutcome("success", "✓", "Voice registered", "Your voice can now confirm payments under S$200.",
+      "Approved with your face and device. Say \"Hey Dimon\" and Dimon will ask for a one-time phrase when you pay. S$200 and above still needs your face.");
+  } else if (result.outcome === "EXECUTED_PAYEE_ADDED") {
+    setOutcome("success", "✓", "Payee saved", `${result.payee.display_name} (${result.payee.masked_destination}) is now a payee.`,
+      "Confirmed with your face and device. For 24 hours, payments to this new payee need a one-time code and are capped.");
+  } else if (result.outcome === "CLARIFICATION_REQUEST" && result.reason_code === "PAYEE_NICKNAME_REQUIRED") {
+    setOutcome("clarification", "?", "Name this payee", result.question, "The number was checked in the PayNow directory. Nothing is saved until you confirm with your face.");
+    ui.candidateList.hidden = false;
+    ui.candidateList.innerHTML = `<form class="nickname-form">
+      <input type="text" maxlength="40" minlength="3" required placeholder="e.g. Uncle Tan" aria-label="Payee name">
+      <button type="submit" class="candidate-choice">Continue</button>
+    </form>`;
+    ui.candidateList.querySelector("form").addEventListener("submit", event => {
+      event.preventDefault();
+      const name = event.target.querySelector("input").value.trim();
+      if (name) followUpCommand(`as ${name}`);
+    });
+  } else if (result.outcome === "CLARIFICATION_REQUEST" && result.reason_code === "MISSING_SOURCE_ACCOUNT") {
+    setOutcome("clarification", "?", "Which account pays?", result.question, "You have more than one account, so the source is never guessed.");
+    ui.candidateList.hidden = false;
+    ui.candidateList.innerHTML = (result.source_options || []).map(option =>
+      `<button type="button" class="candidate-choice" data-account="${escapeHtml(option.label)}">From ${escapeHtml(option.label)} · ${escapeHtml(formatSgd(option.balance_minor))}</button>`).join("");
+    ui.candidateList.querySelectorAll("[data-account]").forEach(button => {
+      button.addEventListener("click", () => followUpCommand(`from ${button.dataset.account}`));
+    });
+  } else if (result.outcome === "EXECUTED_SYNTHETIC_TRANSFER") {
     setOutcome("success", "✓", "Synthetic transfer settled", "The ledger moved exactly once.", `${formatSgd(result.amount_minor)} moved to ${result.resolved_action.recipient_display_name}. The database recorded two balanced entries.`);
     if (result.receipt?.receipt_id) appendEvidenceLink(result.receipt.receipt_id);
     if (result.resolved_action.destination_kind === "PAYNOW_MOBILE" && result.receipt?.receipt_id) {
@@ -1279,7 +1389,10 @@ ui.form.addEventListener("submit", async event => {
   event.preventDefault();
   const text = ui.input.value.trim();
   if (!text) return;
-  if (!activeClarification) lastCommandText = text;
+  if (!activeClarification) {
+    lastCommandText = text;
+    multiRequest.noteSubmit();
+  }
   lastRequestWasSpoken = false;
   const started = performance.now();
   setBusy(true);
@@ -1398,6 +1511,54 @@ document.querySelector("#invest-profile-button")?.addEventListener("click", asyn
   if (await openProfileDialog(overview.questions)) await loadInvestments();
 });
 void loadInvestments();
+initTrtcAssistant();
+
+// Hands-free mode reuses the same rendering, signing and approval paths as the
+// screen, so a spoken approval is checked exactly like a tapped one.
+function requestSignedJson(path, receipt, signed) {
+  return fetch(path, {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({receipt_digest: receipt.receipt_digest, ...signed}),
+  }).then(async response => response.ok
+    ? {kind: "RESULT", result: await response.json()}
+    : {kind: "UNKNOWN", message: `Gateway returned HTTP ${response.status}`})
+    .catch(error => ({kind: "UNKNOWN", message: error instanceof Error ? error.message : String(error)}));
+}
+
+const approvalSubmitters = {
+  "receipts": requestReceiptApproval,
+  "batch-receipts": requestBatchReceiptApproval,
+  "payee-additions": requestPayeeAdditionApproval,
+  "voice-enrollments": (receipt, signed) => requestSignedJson(`/api/voice-enrollments/${receipt.receipt_id}/approve`, receipt, signed),
+};
+
+function showVoicePhrase(phrase, summary) {
+  if (!phrase) return;
+  setOutcome("clarification", "♪", "Confirm by voice", phrase,
+    `Say these four digits to confirm ${summary}. Your voice must match your registered voiceprint, and your device signs the approval.`);
+  ui.outcomeTitle.classList.add("voice-phrase");
+}
+
+initHandsFree({
+  formatSgd,
+  renderResult: result => renderResult(result, 0),
+  async runRequest(text) {
+    const response = await requestAction({requestId: crypto.randomUUID(), text});
+    return response.kind === "RESULT" ? response.result : null;
+  },
+  approveOrder,
+  approvePayeeAddition,
+  screenApproval: (collection, receipt) => signedApproval(
+    collection, receipt, approvalSubmitters[collection],
+    "Retry this exact approval to retrieve its stored result.",
+  ),
+  submitApproval: (collection, receipt, signed) => approvalSubmitters[collection](receipt, signed),
+  ensureSigningCredential,
+  deviceApprover,
+  wireAssertion,
+  showPhrase: showVoicePhrase,
+});
 
 Promise.all([loadSession(), loadState()]).catch(error => {
   ui.healthText.textContent = "Gateway unavailable";

@@ -27,6 +27,7 @@ from .grounding import GroundingError, _bare_amount_minor, _BARE_NUMBER, derive_
 from .receipts import canonical_json, digest_canonical
 
 UNIT = 10_000                       # quantities are stored in 1/10,000 of a unit
+FRACTION_MIN_E4 = 10                # smallest fractional buy: 0.001 of a share
 ORDER_TTL = timedelta(minutes=5)
 PRICE_PROTECTION_BP = 200           # a signed order fills within 2% of its quote
 FEE_BP = 8                          # brokerage 0.08%, minimum S$0.50 (plans: no fee)
@@ -494,7 +495,15 @@ def draft_order(
         evidence["instrument"] = intent.instrument_evidence
         if intent.kind == "BUY":
             kind = "BUY"
-            if intent.amount_minor is not None:
+            limit = math.ceil(quote * (10_000 + PRICE_PROTECTION_BP) / 10_000)
+            if intent.amount_minor is not None and instrument.real_company:
+                # US stocks can be bought in fractions. Size the order so the
+                # most it can cost, fee included, is the amount the user said.
+                quantity = (intent.amount_minor - _fee(intent.amount_minor)) * UNIT // limit
+                if quantity < FRACTION_MIN_E4:
+                    raise InvestRejected("AMOUNT_BELOW_MINIMUM")
+                evidence["amount"] = intent.amount_evidence
+            elif intent.amount_minor is not None:
                 whole = intent.amount_minor // quote
                 if whole < 1:
                     raise InvestRejected("AMOUNT_BELOW_ONE_UNIT")
@@ -505,7 +514,6 @@ def draft_order(
                 evidence["quantity"] = intent.quantity_evidence
             else:
                 raise InvestRejected("MISSING_QUANTITY")
-            limit = math.ceil(quote * (10_000 + PRICE_PROTECTION_BP) / 10_000)
         else:
             kind = "SELL"
             held = _holding(connection, user_id, symbol)

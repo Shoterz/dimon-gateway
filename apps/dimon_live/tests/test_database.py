@@ -44,7 +44,7 @@ class DatabaseSeedTests(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
         self.db_path = Path(self.temp_dir.name) / "demo.sqlite3"
-        self.database = Database(self.db_path)
+        self.database = Database(self.db_path, single_account=True)
         self.database.initialize()
         self.device = SoftwareAuthenticator()
         self.device.enroll(self.database)
@@ -1034,6 +1034,7 @@ class DatabaseSeedTests(unittest.TestCase):
                 ("John Tan", 7500),
                 ("JXXX SXXXX", 0),
                 ("Lim Siew Hua", 20000),
+                ("MXXX LXX", 0),
             ],
         )
         self.approve(self.create_pending_alicia()["receipt_choices"][0])
@@ -1052,6 +1053,7 @@ class DatabaseSeedTests(unittest.TestCase):
                 ("John Tan", 7500),
                 ("JXXX SXXXX", 0),
                 ("Lim Siew Hua", 20000),
+                ("MXXX LXX", 0),
             ],
         )
         self.assertEqual(reset_state["transactions"], [])

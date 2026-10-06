@@ -21,6 +21,17 @@ def _port_from_environment(environ: Mapping[str, str]) -> int:
     return port
 
 
+def _workers_from_environment(environ: Mapping[str, str]) -> int:
+    raw = environ.get("DIMON_WORKERS", "1").strip() or "1"
+    try:
+        workers = int(raw)
+    except ValueError as exc:
+        raise ValueError("DIMON_WORKERS must be an integer between 1 and 64") from exc
+    if not 1 <= workers <= 64:
+        raise ValueError("DIMON_WORKERS must be an integer between 1 and 64")
+    return workers
+
+
 def main(
     *,
     environ: Mapping[str, str] | None = None,
@@ -34,10 +45,17 @@ def main(
 
         runner = uvicorn.run
 
+    options: dict[str, Any] = {}
+    workers = _workers_from_environment(settings)
+    if workers > 1:
+        # Several processes: each user's ledger is its own file and the
+        # registry is shared through SQLite WAL, so workers need no affinity.
+        options["workers"] = workers
     runner(
         "apps.dimon_live.app:app",
         host=settings.get("DIMON_HOST", "127.0.0.1"),
         port=_port_from_environment(settings),
+        **options,
     )
 
 

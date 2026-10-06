@@ -38,6 +38,16 @@
             File   = 'models\face\face_recognition_sface_2021dec.onnx'
         }
     }
+    # Voiceprint for hands-free confirmation of payments under S$200
+    # (WeSpeaker ResNet34, VoxCeleb, CC-BY-4.0, pinned revision).
+    VoiceModels = @{
+        SpeakerEmbedding = @{
+            Url    = 'https://huggingface.co/Wespeaker/wespeaker-voxceleb-resnet34-LM/resolve/f0c48c298fd835726c27956a5d617bad7115627e/voxceleb_resnet34_LM.onnx'
+            Sha256 = '7bb2f06e9df17cdf1ef14ee8a15ab08ed28e8d0ef5054ee135741560df2ec068'
+            Bytes  = 26530309
+            File   = 'models\voice\voxceleb_resnet34_LM.onnx'
+        }
+    }
     Models = @{
         Qwen = @{
             Url    = 'https://huggingface.co/mradermacher/Huihui-Qwen3.5-9B-abliterated-GGUF/resolve/9f646d7eda193ddf2348134f3bff3d49eed7a2c6/Huihui-Qwen3.5-9B-abliterated.Q5_K_M.gguf'

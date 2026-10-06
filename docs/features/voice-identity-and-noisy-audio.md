@@ -1,6 +1,12 @@
 # Voice identity and noisy audio
 
-Status: research direction, not an approval mechanism
+Status: partly implemented (October 2026). Personalised wake word, speaker
+verification and a replay check are in `apps/dimon_live/voiceprint.py` and
+`hands_free.py`. Speaker verification stands in for the face only on approvals
+under S$200, together with a fresh spoken one-time phrase and the device
+signature, never alone; S$200 and above, new payees, investments and voiceprint
+registration still need the face. Presentation-attack (deepfake) detection and
+target-speaker extraction are not implemented.
 
 ## Product question
 

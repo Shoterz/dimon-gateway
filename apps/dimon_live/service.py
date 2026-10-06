@@ -6,7 +6,18 @@ import re
 import sqlite3
 from typing import Any
 
-from . import input_firewall, investing, market, no_approval, scam_guard
+import uuid
+
+from . import (
+    input_firewall,
+    investing,
+    market,
+    multi_intent,
+    no_approval,
+    payee_additions,
+    rule_parser,
+    scam_guard,
+)
 from .approval_gateway import ApprovalContext, DeviceAssertion
 from .batch_grounding import bind_batch_evidence
 from .batch_receipts import BatchReceiptDraft, BatchReceiptItemDraft
@@ -154,8 +165,11 @@ class ActionService:
         *,
         source: str = "typed",
         voice: dict[str, Any] | None = None,
+        nested: bool = False,
     ) -> dict[str, Any]:
-        response = self._with_validation(self._process(request_id, text))
+        response = self._with_validation(
+            self._process(request_id, text, source=source, voice=voice, allow_split=not nested)
+        )
         if not response.get("idempotent_replay"):
             self.database.audit_request(
                 "REQUEST_DRAFTED", request_id, text, response, source=source, voice=voice
@@ -285,7 +299,15 @@ class ActionService:
             }
         return {**response, "trace": trace}
 
-    def _process(self, request_id: str, text: str) -> dict[str, Any]:
+    def _process(
+        self,
+        request_id: str,
+        text: str,
+        *,
+        source: str = "typed",
+        voice: dict[str, Any] | None = None,
+        allow_split: bool = True,
+    ) -> dict[str, Any]:
         existing = self.database.get_attempt(request_id)
         if existing is not None:
             if existing["original_text"] != text:
@@ -327,30 +349,42 @@ class ActionService:
                 trace,
                 extra={"scam": scam.to_dict(), "warning": scam_guard.WARNING},
             )
+        parts = multi_intent.split(text) if allow_split else [text]
+        if len(parts) > 1:
+            return self._process_multi(request_id, text, parts, trace, source=source, voice=voice)
         try:
             invest_intent = investing.understand(text)
         except investing.InvestRejected as exc:
             return self._nonexecuting(request_id, text, "BLOCKED", exc.reason_code, trace)
         if invest_intent is not None:
             return self._investing(request_id, text, trace, invest_intent)
+        addition = payee_additions.understand(text)
+        if addition is not None:
+            return self._payee_addition(request_id, text, trace, addition)
         if no_approval.is_balance_inquiry(text) or no_approval.looks_like_money_request(text):
             return self._answer_without_approval(request_id, text, trace)
-        try:
-            extracted = self.extractor.extract(text)
-        except InferenceFailure as exc:
-            return self._nonexecuting(
-                request_id,
-                text,
-                "FAILED",
-                exc.reason_code,
-                trace,
-            )
+        extracted = rule_parser.parse(text)
+        if extracted is None:
+            try:
+                extracted = self.extractor.extract(text)
+            except InferenceFailure as exc:
+                return self._nonexecuting(
+                    request_id,
+                    text,
+                    "FAILED",
+                    exc.reason_code,
+                    trace,
+                )
+            model_trace = {
+                "stage": "MODEL_RESPONSE_RECEIVED",
+                "latency_ms": extracted.latency_ms,
+            }
+        else:
+            # A plain one-recipient transfer: built by fixed rules, then
+            # checked by the same grounding and policy as model output.
+            model_trace = {"stage": "RULE_PARSER_MATCHED", "latency_ms": 0.0}
 
         intent = extracted.intent
-        model_trace = {
-            "stage": "MODEL_RESPONSE_RECEIVED",
-            "latency_ms": extracted.latency_ms,
-        }
         if extracted.fixture_case_id is not None:
             model_trace["fixture_case_id"] = extracted.fixture_case_id
         trace.append(model_trace)
@@ -358,7 +392,7 @@ class ActionService:
 
         recovered_batch = self._recover_exact_saved_batch(text, intent)
         if recovered_batch is not None:
-            if intent.get("payment_reference"):
+            if intent.get("payment_reference") and not re.search(r"\d", intent["payment_reference"]):
                 trace.append({"stage": "BATCH_REFERENCE_NOTED", "reference": intent["payment_reference"]})
             intent = recovered_batch
             extracted = type(extracted)(
@@ -486,7 +520,7 @@ class ActionService:
                     "MISSING_SOURCE_ACCOUNT",
                     trace,
                     extracted=extracted,
-                    extra={"question": "Which account should fund this transfer?"},
+                    extra=self._source_question(user_sources),
                 )
             source = user_sources[0]
             trace.append(
@@ -821,6 +855,17 @@ class ActionService:
         # whole batch ("... for the flowers"): after every name and amount,
         # and with no numbers of its own.
         reference_start = None
+        try:
+            stated_amounts = {
+                normalize_evidence(mention.evidence)
+                for mention in derive_amount_mentions_from_text(text)
+            }
+        except GroundingError:
+            stated_amounts = set()
+        if normalize_evidence(intent.get("reference_evidence") or "") in stated_amounts:
+            # The model labelled one of the amounts as the reference ("S$6.50");
+            # an amount is never a reference, and amounts are grounded later.
+            intent = {**intent, "payment_reference": None, "reference_evidence": None}
         if intent.get("payment_reference") is not None:
             evidence = intent.get("reference_evidence") or ""
             reference_start = text.casefold().rfind(evidence.casefold()) if evidence else -1
@@ -935,7 +980,7 @@ class ActionService:
                 return self._nonexecuting(
                     request_id, text, "CLARIFICATION_REQUEST",
                     "MISSING_SOURCE_ACCOUNT", trace, extracted=extracted,
-                    extra={"question": "Which account should fund this transfer?"},
+                    extra=self._source_question(user_sources),
                 )
             source = user_sources[0]
             trace.append({
@@ -1456,6 +1501,7 @@ class ActionService:
         "NOT_HELD": "You don't hold that investment.",
         "SELL_MORE_THAN_HELD": "That's more than you hold.",
         "AMOUNT_BELOW_ONE_UNIT": "That amount is less than the price of one unit.",
+        "AMOUNT_BELOW_MINIMUM": "That amount is too small to cover the trading fee.",
         "PLAN_AMOUNT_OUT_OF_RANGE": "Monthly plans run from S$50 to S$2,000 a month.",
         "ORDER_LIMIT_EXCEEDED": "A single order can be up to S$5,000.",
         "DAILY_TRADING_LIMIT_EXCEEDED": "That would pass the S$10,000 daily trading limit.",
@@ -1541,6 +1587,131 @@ class ActionService:
                 "state": self.database.get_state(),
             }
         return self._audit_refusal(order_id, order_digest, result)
+
+    @staticmethod
+    def _source_question(user_sources: list[dict[str, Any]]) -> dict[str, Any]:
+        """Ask which account pays. The answer is the user's own words: the
+        browser re-sends the request with "from <account>" added."""
+
+        labels = [account["label"] for account in user_sources]
+        return {
+            "question": f"Which account should fund this transfer: {' or '.join(labels)}?",
+            "source_options": [
+                {"label": account["label"], "balance_minor": account["balance_minor"]}
+                for account in user_sources
+            ],
+        }
+
+    def _process_multi(
+        self,
+        request_id: str,
+        text: str,
+        parts: list[str],
+        trace: list[dict[str, Any]],
+        *,
+        source: str,
+        voice: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        """Several requests in one sentence. Each part runs through the whole
+        pipeline on its own and gets its own receipt and signed approval, so
+        approving one never approves another. The firewall and scam check
+        have already passed on the whole sentence."""
+
+        trace.append({"stage": "MULTIPLE_REQUESTS_FOUND", "count": len(parts)})
+        if len(parts) > multi_intent.MAX_PARTS:
+            return self._nonexecuting(
+                request_id, text, "BLOCKED", "TOO_MANY_REQUESTS", trace,
+                extra={"question": f"Please ask for up to {multi_intent.MAX_PARTS} things at a time."},
+            )
+        if multi_intent.has_negation(text):
+            # "send John $5 and don't buy NVIDIA": rather than guess which part
+            # a "don't" cancels, nothing is drafted.
+            return self._nonexecuting(
+                request_id, text, "BLOCKED", "MULTI_REQUEST_NEGATION", trace,
+                extra={"question": "Please say only the things you want done, without 'don't' or 'cancel'."},
+            )
+        steps = []
+        for index, part in enumerate(parts):
+            part_request_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"dimon:{request_id}:part:{index}"))
+            result = self.process(part_request_id, part, source=source, voice=voice, nested=True)
+            steps.append({"index": index, "text": part, "request_id": part_request_id, "result": result})
+        drafted = sum(
+            1 for step in steps
+            if step["result"].get("outcome") not in {"BLOCKED", "FAILED"}
+        )
+        return self._nonexecuting(
+            request_id, text, "MULTI_REQUEST", "MULTIPLE_REQUESTS", trace,
+            extra={
+                "steps": steps,
+                "question": (
+                    f"I found {len(steps)} requests. Each one is checked and approved on its own"
+                    + (f"; {len(steps) - drafted} could not be drafted." if drafted < len(steps) else ".")
+                ),
+            },
+        )
+
+    def _payee_addition(
+        self,
+        request_id: str,
+        text: str,
+        trace: list[dict[str, Any]],
+        addition: dict[str, str | None],
+    ) -> dict[str, Any]:
+        trace.append({"stage": "PAYEE_ADDITION_UNDERSTOOD"})
+        if not is_grounded(text, addition["proxy_evidence"]):
+            return self._nonexecuting(request_id, text, "BLOCKED", "UNGROUNDED_RECIPIENT", trace)
+        try:
+            lookup = self.paynow_directory.lookup_mobile(addition["proxy"], request_id)
+        except PayNowLookupError as exc:
+            question = {
+                "PAYNOW_PROXY_NOT_FOUND": "That number isn't registered for PayNow, so it can't be added.",
+                "PAYNOW_PROXY_INACTIVE": "That PayNow number is no longer active.",
+            }.get(exc.reason_code)
+            return self._nonexecuting(request_id, text, "BLOCKED", exc.reason_code, trace,
+                                      extra={"question": question} if question else None)
+        trace.append({"stage": "PAYNOW_PROXY_RESOLVED", "lookup_reference": lookup.lookup_reference})
+        masked = payee_additions.masked_proxy(lookup.canonical_proxy)
+        nickname = addition["nickname"]
+        try:
+            self.database.payee_addition_check(lookup.destination_account_id, nickname)
+            if nickname is None:
+                return self._nonexecuting(
+                    request_id, text, "CLARIFICATION_REQUEST", "PAYEE_NICKNAME_REQUIRED", trace,
+                    extra={
+                        "question": f"{masked} is registered to {lookup.masked_name}. What should I save them as?",
+                        "payee_lookup": {"masked_name": lookup.masked_name, "masked_proxy": masked},
+                    },
+                )
+            draft = self.database.draft_payee_addition(request_id, text, lookup, nickname)
+        except payee_additions.PayeeAdditionRejected as exc:
+            question = {
+                "PAYEE_ALREADY_SAVED": f"{masked} ({lookup.masked_name}) is already one of your payees.",
+                "NICKNAME_IN_USE": f"You already have a payee called {nickname}. Choose another name.",
+                "INVALID_NICKNAME": "Payee names can use letters, spaces, hyphens and apostrophes (3 to 40 characters).",
+            }.get(exc.reason_code)
+            return self._nonexecuting(request_id, text, "BLOCKED", exc.reason_code, trace,
+                                      extra={"question": question})
+        trace.append({"stage": "PAYEE_ADDITION_DRAFTED", "addition_id": draft["addition_id"]})
+        return self._nonexecuting(
+            request_id, text, "PAYEE_ADDITION_REQUEST", "SIGNED_APPROVAL_REQUIRED", trace,
+            extra={
+                "payee_addition": draft,
+                "question": f"Save {masked} ({draft['masked_name']}) as {draft['nickname']}? Confirm with your face.",
+            },
+        )
+
+    def approve_payee_addition(self, addition_id: str, addition_digest: str, **kwargs: Any) -> dict[str, Any]:
+        trace = [{"stage": "PAYEE_ADDITION_APPROVAL_RECEIVED"}]
+        try:
+            result = self.database.approve_payee_addition(addition_id, addition_digest, **kwargs)
+        except ReceiptRejected as exc:
+            result = {
+                "outcome": "BLOCKED",
+                "reason_code": exc.reason_code,
+                "trace": trace + [{"stage": exc.reason_code}],
+                "state": self.database.get_state(),
+            }
+        return self._audit_refusal(addition_id, addition_digest, result)
 
     def _answer_without_approval(
         self, request_id: str, text: str, trace: list[dict[str, Any]]

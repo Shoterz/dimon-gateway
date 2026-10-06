@@ -102,6 +102,7 @@ class FixtureSessionUiTests(unittest.TestCase):
                 return await client.get("/api/session")
 
         self.assertEqual(asyncio.run(send()).status_code, 200)
+        app.state.session_manager.close()
 
     def test_configured_localhost_port_serves_the_page_without_origin(self) -> None:
         from apps.dimon_live.app import create_app
@@ -124,6 +125,7 @@ class FixtureSessionUiTests(unittest.TestCase):
                 return await client.get("/")
 
         self.assertEqual(asyncio.run(send()).status_code, 200)
+        app.state.session_manager.close()
 
 
 if __name__ == "__main__":

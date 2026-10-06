@@ -18,6 +18,7 @@ dependencies = [
     "PyYAML>=6,<7",
     "uvicorn[standard]>=0.46,<0.47",
     "websockets>=16,<17",
+    "onnxruntime>=1.20,<2",
 ]
 
 [project.scripts]

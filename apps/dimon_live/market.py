@@ -1,7 +1,10 @@
-"""A simulated SGX-style market: fictional instruments and their prices.
+"""A simulated market: fictional SGX-style instruments plus a few well-known
+US companies, all with generated prices.
 
-Every company and fund here is fictional, so no real company is described
-with made-up facts. Prices follow a deterministic random walk per
+The local companies and funds are fictional. The US companies are real, so
+their descriptions stay to plain, widely known facts about what they do, and
+their prices are generated like every other price here: they are labelled
+"simulated price" and are never a live quote. Prices follow a deterministic random walk per
 instrument (the same for every session and every restart), updated every
 15 minutes during the day, so "trending" and returns are computed from data
 rather than invented. Everything is in Singapore dollars and cents.
@@ -19,7 +22,8 @@ from functools import lru_cache
 SGT = timezone(timedelta(hours=8))
 EPOCH = date(2025, 1, 1)
 DISCLAIMER = (
-    "Simulated market with fictional companies and funds. Suggestions come from fixed rules "
+    "Simulated market: fictional local companies and funds, plus well-known US companies whose "
+    "prices are generated here, not live quotes. Suggestions come from fixed rules "
     "applied to price data and your risk profile, not from the AI. Not financial advice: "
     "investments can fall as well as rise, and past performance does not guarantee future results."
 )
@@ -40,6 +44,7 @@ class Instrument:
     strengths: tuple[str, ...]
     risks: tuple[str, ...]
     aliases: tuple[str, ...] = ()
+    real_company: bool = False   # a real listed company with a simulated price
 
 
 CATALOG: tuple[Instrument, ...] = (
@@ -93,6 +98,37 @@ CATALOG: tuple[Instrument, ...] = (
                ("Very low risk of default", "Steady interest income", "Cushions a portfolio when shares fall"),
                ("Low long-term growth", "Price dips when interest rates rise"),
                ("bond etf", "government bond", "bonds", "sg bond")),
+    # Real companies with simulated prices (in S$). Plain, well-known facts only.
+    Instrument("NVDA", "NVIDIA", "STOCK", "Technology (US)", 5, 3, 18000, 0.15, 0.48,
+               "Designs graphics processors and AI accelerator chips used in data centres and PCs.",
+               ("Leading supplier of chips for training AI models", "Software ecosystem that keeps developers on its chips"),
+               ("Very volatile price", "Sales depend heavily on data-centre spending cycles"),
+               ("nvidia", "nvidia corp", "nvidia corporation", "nvda"), real_company=True),
+    Instrument("AAPL", "Apple", "STOCK", "Technology (US)", 3, 45, 29000, 0.09, 0.26,
+               "Makes the iPhone, Mac and iPad, and sells services such as the App Store.",
+               ("Very large, loyal customer base", "Growing services revenue"),
+               ("Depends on iPhone sales", "Regulation of app stores"),
+               ("apple", "apple inc", "aapl"), real_company=True),
+    Instrument("MSFT", "Microsoft", "STOCK", "Technology (US)", 3, 70, 56000, 0.10, 0.24,
+               "Sells Windows, Office and the Azure cloud platform.",
+               ("Recurring software subscriptions", "Large cloud business"),
+               ("Heavy spending on data centres", "Competition in cloud and AI"),
+               ("microsoft", "msft"), real_company=True),
+    Instrument("GOOGL", "Alphabet", "STOCK", "Technology (US)", 3, 45, 23000, 0.10, 0.28,
+               "Owns Google Search, YouTube, Android and Google Cloud.",
+               ("Dominant search advertising business", "Growing cloud division"),
+               ("Advertising falls in downturns", "Antitrust cases against Google"),
+               ("alphabet", "google", "googl"), real_company=True),
+    Instrument("AMZN", "Amazon", "STOCK", "Consumer and cloud (US)", 4, 0, 27000, 0.11, 0.30,
+               "Runs an online store and Amazon Web Services, a large cloud provider.",
+               ("Large cloud business", "Huge logistics network"),
+               ("Thin retail profit margins", "Pays no dividend"),
+               ("amazon", "amzn"), real_company=True),
+    Instrument("TSLA", "Tesla", "STOCK", "Automotive (US)", 5, 0, 40000, 0.12, 0.60,
+               "Makes electric cars and batteries for homes and power grids.",
+               ("Well-known electric vehicle brand", "Energy storage business"),
+               ("Extremely volatile price", "Price competition from other car makers"),
+               ("tesla", "tsla"), real_company=True),
 )
 BY_SYMBOL = {instrument.symbol: instrument for instrument in CATALOG}
 
@@ -171,6 +207,7 @@ def snapshot(symbol: str, now: datetime) -> dict:
         "summary": instrument.summary,
         "strengths": list(instrument.strengths),
         "risks": list(instrument.risks),
+        "simulated_price": instrument.real_company,
     }
 
 

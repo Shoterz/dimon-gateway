@@ -12,7 +12,12 @@ from pathlib import Path
 from typing import Awaitable, Callable
 from urllib.parse import urljoin, urlparse, urlsplit, urlunsplit
 
+import re
+
 import httpx
+
+# Server-made identifiers only (token_urlsafe); never a path.
+_ARTIFACT_ID = re.compile(r"[A-Za-z0-9_-]{16,80}")
 
 
 @dataclass(frozen=True)
@@ -219,6 +224,7 @@ class SpeechService:
         path = self.audio_dir / context.session_id / f"{artifact_id}.wav"
         self._artifacts[artifact_id] = (context.session_id, path, time.time() + self.ttl_seconds)
         self._pending.add(artifact_id)
+        self._mark_pending(path)
         task = asyncio.create_task(
             self._synthesize_queued(copy.deepcopy(result), text, artifact_id, path)
         )
@@ -234,6 +240,7 @@ class SpeechService:
         path = self.audio_dir / context.session_id / f"{artifact_id}.wav"
         self._artifacts[artifact_id] = (context.session_id, path, time.time() + self.ttl_seconds)
         self._pending.add(artifact_id)
+        self._mark_pending(path)
         task = asyncio.create_task(self._synthesize_text(text, artifact_id, path))
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
@@ -252,6 +259,7 @@ class SpeechService:
             self._artifacts.pop(artifact_id, None)
         finally:
             self._pending.discard(artifact_id)
+            path.with_suffix(".pending").unlink(missing_ok=True)
 
     async def _synthesize_queued(
         self,
@@ -268,6 +276,7 @@ class SpeechService:
             self._artifacts.pop(artifact_id, None)
         finally:
             self._pending.discard(artifact_id)
+            path.with_suffix(".pending").unlink(missing_ok=True)
 
     async def _synthesize_into(self, result: dict, text: str, path: Path) -> None:
         synthesize_result = getattr(self.synthesizer, "synthesize_result", None)
@@ -282,17 +291,48 @@ class SpeechService:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(data)
 
+    @staticmethod
+    def _mark_pending(path: Path) -> None:
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.with_suffix(".pending").touch()
+        except OSError:
+            pass
+
+    def _disk_path(self, artifact_id: str, context) -> Path | None:
+        """Where another worker process would have written this artifact.
+        Only the requesting session's own folder is ever looked in."""
+
+        if not _ARTIFACT_ID.fullmatch(artifact_id or "") or not _ARTIFACT_ID.fullmatch(context.session_id or ""):
+            return None
+        return self.audio_dir / context.session_id / f"{artifact_id}.wav"
+
     def is_pending(self, artifact_id: str, context) -> bool:
         record = self._artifacts.get(artifact_id)
-        return bool(record and record[0] == context.session_id and artifact_id in self._pending)
+        if record is not None:
+            return record[0] == context.session_id and artifact_id in self._pending
+        path = self._disk_path(artifact_id, context)
+        marker = path.with_suffix(".pending") if path else None
+        try:
+            return bool(marker and marker.is_file() and time.time() - marker.stat().st_mtime < 60)
+        except OSError:
+            return False
 
     async def read(self, artifact_id: str, context) -> bytes | None:
         self.cleanup()
         record = self._artifacts.get(artifact_id)
-        if record is None or record[0] != context.session_id:
-            return None
+        if record is not None:
+            if record[0] != context.session_id:
+                return None
+            path = record[1]
+        else:
+            path = self._disk_path(artifact_id, context)
+            if path is None:
+                return None
         try:
-            return record[1].read_bytes()
+            if time.time() - path.stat().st_mtime > self.ttl_seconds:
+                return None
+            return path.read_bytes()
         except OSError:
             return None
 

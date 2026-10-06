@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 import base64
 import binascii
@@ -26,7 +27,7 @@ from .approval_gateway import (
 )
 from .database import Database, ReceiptRejected
 from .face_id import MAX_FRAMES, MIN_FRAMES, FaceRejected
-from . import investing, market, singpass
+from . import investing, market, singpass, trtc
 from .payees import PayeeSaveRejected
 from .read_back import build_read_back
 from .tencent_tts import read_back_synthesizer_from_env
@@ -37,7 +38,9 @@ from .receipts import DEMO_USER_ID
 from .service import ActionService
 from .session_manager import SessionBoundaryError, SessionContext, SessionManager
 from .speech import SpeechService
-from .voice import VoiceBridge
+from .hands_free import HandsFreeBridge
+from .voice import VoiceBridge, VoiceLease
+from .voiceprint import VoiceRejected
 
 
 APP_DIR = Path(__file__).resolve().parent
@@ -192,6 +195,12 @@ class ClarificationResponseRequest(BaseModel):
         return normalized
 
 
+class VoicePhraseRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    challenge_id: ChallengeId
+
+
 class VoiceClientDiagnostic(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -217,6 +226,8 @@ def create_app(
     speech_service: SpeechService | None = None,
     providers: InferenceProviders | None = None,
     face_engine: Any = None,
+    trtc_assistant: trtc.TrtcConversationService | None = None,
+    voice_engine: Any = None,
 ) -> FastAPI:
     if providers is not None and any(
         dependency is not None
@@ -229,7 +240,7 @@ def create_app(
     )
     legacy_database: Database | None = None
     if db_path is not None:
-        legacy_database = Database(Path(db_path), face_engine=face_engine)
+        legacy_database = Database(Path(db_path), face_engine=face_engine, voice_engine=voice_engine)
         legacy_database.initialize()
     manager = session_manager or (
         SessionManager.from_environment(legacy_database=legacy_database)
@@ -246,15 +257,47 @@ def create_app(
     )
     if face_engine is not None:
         manager.face_engine = face_engine
+    if voice_engine is not None:
+        manager.voice_engine = voice_engine
     selected_extractor = extractor or selected_providers.extractor
-    application = FastAPI(title="Dimon Live", version="0.1.0")
+    async def sweep_expired_ledgers() -> None:
+        while True:
+            await asyncio.sleep(float(os.environ.get("DIMON_LEDGER_SWEEP_SECONDS", "300")))
+            try:
+                await asyncio.to_thread(manager.cleanup)
+            except Exception:  # noqa: BLE001 - the next sweep tries again
+                logger.exception("ledger sweep failed")
+
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI):
+        # Expired anonymous ledgers are swept in the background, in batches
+        # from the registry index, never by scanning folders per request.
+        sweep = asyncio.create_task(sweep_expired_ledgers()) if manager.legacy_database is None else None
+        try:
+            yield
+        finally:
+            if sweep is not None:
+                sweep.cancel()
+            manager.close()
+
+    application = FastAPI(title="Dimon Live", version="0.1.0", lifespan=lifespan)
     application.state.database = legacy_database
     application.state.session_manager = manager
     application.state.extractor = selected_extractor
     application.state.inference_mode = selected_providers.mode
+    # One lease on the speech recogniser for push-to-talk and hands-free. A
+    # local model serves one utterance at a time; a cloud one (TRTC) scales.
+    stt_backend = os.environ.get("DIMON_STT_BACKEND", "").strip().lower()
+    voice_lease = VoiceLease(int(os.environ.get(
+        "DIMON_VOICE_CONCURRENCY", "256" if stt_backend == "trtc" else "1"
+    )))
+    application.state.hands_free = HandsFreeBridge(
+        recognizer=selected_providers.recognizer, lease=voice_lease
+    )
     application.state.voice_bridge = voice_bridge or VoiceBridge(
         recognizer=selected_providers.recognizer,
         lifecycle=selected_providers.voice_lifecycle,
+        lease=voice_lease,
         max_audio_bytes=int(os.environ.get("DIMON_MAX_AUDIO_BYTES", "4000000")),
         max_utterance_seconds=float(os.environ.get("DIMON_MAX_UTTERANCE_SECONDS", "30")),
         endpoint_silence_seconds=float(os.environ.get("DIMON_VOICE_ENDPOINT_SILENCE_SECONDS", "1.4")),
@@ -262,16 +305,28 @@ def create_app(
         speech_threshold=float(os.environ.get("DIMON_VOICE_SPEECH_THRESHOLD", "0.015")),
         evidence_dir=Path(os.environ.get("DIMON_VOICE_EVIDENCE_DIR", "runtime/evidence")),
     )
+    read_back_synthesizer = read_back_synthesizer_from_env(
+        os.environ, selected_providers.synthesizer
+    )
+    tts_provider = os.environ.get("DIMON_TTS_PROVIDER", "").strip().lower()
     application.state.speech_service = speech_service or SpeechService(
         base_url=os.environ.get("DIMON_KOKORO_URL", "http://127.0.0.1:3001"),
         audio_dir=Path(os.environ.get("DIMON_AUDIO_DIR", APP_DIR / "runtime" / "audio")),
-        synthesizer=selected_providers.synthesizer,
+        # TRTC TTS speaks results as well as read-backs; the local voice
+        # remains the fallback inside read_back_synthesizer.
+        synthesizer=read_back_synthesizer if tts_provider == "trtc" else selected_providers.synthesizer,
         max_wav_bytes=int(os.environ.get("DIMON_MAX_WAV_BYTES", str(8 * 1_048_576)),),
         ttl_seconds=int(os.environ.get("DIMON_VISITOR_TTL_SECONDS", "3600")),
-        read_back_synthesizer=read_back_synthesizer_from_env(
-            os.environ, selected_providers.synthesizer
-        ),
+        read_back_synthesizer=read_back_synthesizer,
     )
+    application.state.trtc_assistant = (
+        trtc_assistant if trtc_assistant is not None else trtc.conversation_from_env(os.environ)
+    )
+    application.state.trtc_features = {
+        "assistant": application.state.trtc_assistant is not None,
+        "speech_recognition": os.environ.get("DIMON_STT_BACKEND", "").strip().lower() == "trtc",
+        "speech_synthesis": tts_provider == "trtc",
+    }
 
     def resolve(request: Request, response: Response) -> SessionContext:
         try:
@@ -563,6 +618,39 @@ def create_app(
         )
         return await attach_speech(result, context)
 
+    @application.post("/api/payee-additions/{addition_id}/challenge")
+    async def payee_addition_challenge(
+        request: Request, response: Response, addition_id: str, body: ReceiptChallengeRequest
+    ):
+        context = resolve(request, response)
+        try:
+            challenge = context.database.issue_payee_addition_challenge(
+                addition_id, body.receipt_digest, rp_id=approval_context(request).rp_id
+            )
+        except ReceiptRejected as exc:
+            return blocked(exc.reason_code, context)
+        queue_text = getattr(application.state.speech_service, "queue_text", None)
+        text = challenge["review"]["read_back"]["text"]
+        challenge["review"]["read_back"]["audio_artifact_id"] = queue_text(text, context) if callable(queue_text) else None
+        return challenge
+
+    @application.post("/api/payee-additions/{addition_id}/approve")
+    async def approve_payee_addition(
+        request: Request, response: Response, addition_id: str, approval: ReceiptApprovalRequest
+    ):
+        context = resolve(request, response)
+        try:
+            assertion = device_assertion(approval)
+        except ApprovalRejected as exc:
+            return blocked(exc.reason_code, context)
+        return await asyncio.to_thread(
+            service_for(context).approve_payee_addition,
+            addition_id,
+            approval.receipt_digest,
+            assertion=assertion,
+            context=approval_context(request),
+        )
+
     @application.get("/api/face")
     async def face_status(request: Request, response: Response):
         context = resolve(request, response)
@@ -590,7 +678,7 @@ def create_app(
     async def kyc_complete(request: Request, response: Response, completion: KycCompletionRequest):
         context = resolve(request, response)
         try:
-            return context.database.complete_kyc_onboarding(
+            completed = context.database.complete_kyc_onboarding(
                 consent_id=completion.consent_id,
                 challenge_id=completion.challenge_id,
                 credential_kind=completion.credential_kind,
@@ -608,6 +696,10 @@ def create_app(
             )
         except ApprovalRejected as exc:
             raise HTTPException(status_code=400, detail=exc.reason_code) from exc
+        if context.role == "visitor":
+            # A verified customer's ledger is kept; only anonymous ones expire.
+            manager.mark_registered(context.session_id)
+        return completed
 
     @application.post("/api/payees")
     async def save_payee(request: Request, response: Response, body: SavePayeeRequest):
@@ -749,6 +841,121 @@ def create_app(
             return await attach_speech(result, context)
 
         await application.state.voice_bridge.handle(websocket, context, dispatch)
+
+    @application.get("/api/trtc")
+    async def trtc_features(request: Request, response: Response):
+        resolve(request, response)
+        return application.state.trtc_features
+
+    def trtc_assistant_service() -> trtc.TrtcConversationService:
+        assistant = application.state.trtc_assistant
+        if assistant is None:
+            raise HTTPException(status_code=503, detail="TRTC_ASSISTANT_DISABLED")
+        return assistant
+
+    def trtc_failure(exc: trtc.TrtcError) -> HTTPException:
+        logger.warning("trtc_failure reason=%s request_id=%s", exc.reason_code, exc.request_id)
+        return HTTPException(status_code=502, detail=exc.reason_code)
+
+    @application.post("/api/trtc/assistant/join")
+    async def trtc_assistant_join(request: Request, response: Response):
+        """Room credentials for the browser. Only a UserSig leaves the server."""
+
+        context = resolve(request, response)
+        try:
+            return await trtc_assistant_service().join(context.session_id)
+        except trtc.TrtcError as exc:
+            raise trtc_failure(exc) from exc
+
+    @application.post("/api/trtc/assistant/start")
+    async def trtc_assistant_start(request: Request, response: Response):
+        context = resolve(request, response)
+        try:
+            return await trtc_assistant_service().start(context.session_id)
+        except trtc.TrtcError as exc:
+            raise trtc_failure(exc) from exc
+
+    @application.post("/api/trtc/assistant/stop")
+    async def trtc_assistant_stop(request: Request, response: Response):
+        context = resolve(request, response)
+        return {"stopped": await trtc_assistant_service().stop(context.session_id)}
+
+    # ------------------------------------------------------------ voice
+    @application.get("/api/voiceprint")
+    async def voiceprint_status(request: Request, response: Response):
+        context = resolve(request, response)
+        return context.database.voice_status()
+
+    @application.post("/api/voiceprint/enrollments")
+    async def voiceprint_enrollment(request: Request, response: Response):
+        context = resolve(request, response)
+        try:
+            return await asyncio.to_thread(context.database.start_voice_enrollment)
+        except VoiceRejected as exc:
+            status = 503 if exc.reason_code == "VOICE_ENGINE_UNAVAILABLE" else 400
+            raise HTTPException(status_code=status, detail=exc.reason_code) from exc
+
+    @application.post("/api/voice-enrollments/{enrollment_id}/challenge")
+    async def voice_enrollment_challenge(
+        request: Request, response: Response, enrollment_id: str, body: ReceiptChallengeRequest
+    ):
+        context = resolve(request, response)
+        try:
+            return context.database.issue_voice_enrollment_challenge(
+                enrollment_id, body.receipt_digest, rp_id=approval_context(request).rp_id
+            )
+        except ReceiptRejected as exc:
+            return blocked(exc.reason_code, context)
+
+    @application.post("/api/voice-enrollments/{enrollment_id}/approve")
+    async def voice_enrollment_approve(
+        request: Request, response: Response, enrollment_id: str, approval: ReceiptApprovalRequest
+    ):
+        context = resolve(request, response)
+        try:
+            assertion = device_assertion(approval)
+        except ApprovalRejected as exc:
+            return blocked(exc.reason_code, context)
+        try:
+            return await asyncio.to_thread(
+                context.database.approve_voice_enrollment, enrollment_id, approval.receipt_digest,
+                assertion=assertion, context=approval_context(request),
+            )
+        except ReceiptRejected as exc:
+            return blocked(exc.reason_code, context)
+
+    @application.post("/api/voice/phrase")
+    async def voice_phrase(request: Request, response: Response, body: VoicePhraseRequest):
+        """The one-time digits to say for an approval under S$200."""
+
+        context = resolve(request, response)
+        try:
+            return context.database.issue_voice_phrase(body.challenge_id)
+        except VoiceRejected as exc:
+            raise HTTPException(status_code=400, detail=exc.reason_code) from exc
+
+    @application.websocket("/api/voice/hands-free")
+    async def hands_free(websocket: WebSocket):
+        try:
+            context = manager.resolve_headers(
+                host=websocket.headers.get("host", "").lower(),
+                origin=websocket.headers.get("origin"),
+                cookie=websocket.cookies.get(manager.cookie_name),
+                access_assertion=websocket.headers.get("cf-access-jwt-assertion"),
+            )
+        except SessionBoundaryError as exc:
+            await websocket.accept()
+            await websocket.send_json({"type": "error", "reason_code": exc.reason_code})
+            await websocket.close(code=1008)
+            return
+
+        async def dispatch(text: str, evidence: dict):
+            result = await asyncio.to_thread(
+                service_for(context).process, str(uuid4()), text, source="voice", voice=evidence
+            )
+            return await attach_speech(result, context)
+
+        await application.state.hands_free.handle(websocket, context, dispatch)
 
     @application.post("/api/voice/diagnostics", status_code=204)
     async def voice_client_diagnostic(
@@ -922,6 +1129,30 @@ def create_app(
     async def voice_capture_worklet():
         return Response(
             (STATIC_DIR / "voice_capture_worklet.js").read_text(encoding="utf-8"),
+            media_type="application/javascript",
+            headers={"Cache-Control": "no-store"},
+        )
+
+    @application.get("/static/trtc_assistant.mjs", include_in_schema=False)
+    async def trtc_assistant_script():
+        return Response(
+            (STATIC_DIR / "trtc_assistant.mjs").read_text(encoding="utf-8"),
+            media_type="application/javascript",
+            headers={"Cache-Control": "no-store"},
+        )
+
+    @application.get("/static/hands_free.mjs", include_in_schema=False)
+    async def hands_free_script():
+        return Response(
+            (STATIC_DIR / "hands_free.mjs").read_text(encoding="utf-8"),
+            media_type="application/javascript",
+            headers={"Cache-Control": "no-store"},
+        )
+
+    @application.get("/static/multi_request.mjs", include_in_schema=False)
+    async def multi_request_script():
+        return Response(
+            (STATIC_DIR / "multi_request.mjs").read_text(encoding="utf-8"),
             media_type="application/javascript",
             headers={"Cache-Control": "no-store"},
         )
