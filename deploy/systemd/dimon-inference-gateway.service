@@ -1,8 +1,6 @@
 [Unit]
 Description=Dimon bounded inference gateway
 After=network.target
-After=dimon-gpu-host.service
-Requires=dimon-gpu-host.service
 StartLimitIntervalSec=60
 StartLimitBurst=3
 

@@ -1,75 +1,90 @@
 # Inference gateway
 
-The inference gateway is Dimon's only team-facing model boundary. It runs on the
-GPU host at `127.0.0.1:8891`; Cloudflare Tunnel publishes that single loopback
-service as `dimon-inference.stocksuite.app`. Qwen, Nemotron, and Kokoro continue
-to listen only on loopback and are never direct public routes.
+The inference gateway is Dimon's only team-facing model boundary. It runs on
+the GPU host at `127.0.0.1:8891`; the Cloudflare Tunnel hostname
+`tencentservices.stocksuite.app` targets `http://127.0.0.1:8891`. Qwen, Nemotron,
+and Kokoro remain on private loopback ports. Qwen intent requests go to the
+loopback API managed by the GPU host's existing model supervisor.
 
-The gateway can propose an intent, transcribe bounded audio, or speak a
-committed synthetic result. It cannot read Dimon's SQLite databases, approve a
-receipt, execute a transfer, select arbitrary models, accept arbitrary prompts,
-or synthesize arbitrary text. Grounding, policy, receipts, approval, and ledger
-writes remain in each Dimon application process.
+The gateway exposes bounded Qwen tasks (`POST /v1/intent` and `POST /v1/qwen`),
+transcription (`WS /v1/transcription`), and result speech (`POST /v1/speech`). It cannot read
+Dimon's SQLite databases, approve a receipt, execute a transfer, select
+arbitrary models, accept arbitrary prompts, or synthesize arbitrary text.
+Grounding, policy, receipts, approval, and ledger writes remain in each Dimon
+application process.
 
 ## Host configuration
 
-Copy `.env.example` to an ignored environment file and set these values on the
-GPU host:
+The GPU host's ignored `.env.host` supplies the gateway settings. Use the same
+rotated `DIMON_INFERENCE_SERVICE_KEY` as each authorized teammate's ignored
+local environment:
 
 ```dotenv
 DIMON_GATEWAY_HOST=127.0.0.1
 DIMON_GATEWAY_PORT=8891
-DIMON_GATEWAY_TRUSTED_PROXIES=127.0.0.1,::1
-DIMON_CF_ACCESS_AUDIENCE=<access-application-audience>
-DIMON_CF_ACCESS_ISSUER=https://<team-name>.cloudflareaccess.com
+DIMON_INFERENCE_SERVICE_KEY=<shared-key>
 
 DIMON_QWEN_API_BASE=http://127.0.0.1:8080/v1
 DIMON_QWEN_MODEL=<configured-model-alias>
 DIMON_QWEN_REVISION=<immutable-safe-revision>
 DIMON_NEMOTRON_URL=ws://127.0.0.1:8004/v1/realtime
+DIMON_NEMOTRON_CONTROL_SOCKET=<absolute-path-to-supervisor-control-socket>
 DIMON_NEMOTRON_REVISION=<immutable-safe-revision>
+DIMON_GATEWAY_STT_BACKEND=dual
+DIMON_WHISPER_URL=ws://127.0.0.1:8007/ws
+DIMON_WHISPER_REVISION=faster-whisper-medium-cuda
 DIMON_KOKORO_URL=http://127.0.0.1:3001
 DIMON_KOKORO_REVISION=<immutable-safe-revision>
 ```
 
-Revision values are returned by readiness and model responses, so they accept
-only short identifiers containing letters, digits, `.`, `_`, `:`, `+`, `@`, or
-`-`. Do not put paths, credentials, or mutable labels in revision fields.
+When Nemotron runs under the Jarvis on-demand supervisor, set the control socket
+path (for example `/run/user/1000/jarvis-nemotron.ctl.sock`). The gateway
+acquires the supervisor before opening the WebSocket and releases it when the
+session ends. Readiness checks the control socket, so an idle, unloaded Nemotron
+model still reports as available.
 
-Start the gateway with the locked project environment:
+In `dual` mode, every microphone chunk goes to both engines. Nemotron supplies
+live `transcript.partial` captions and the primary final transcript used for
+financial intent. Project-local Faster-Whisper Medium on CUDA runs in parallel
+for disagreement diagnostics and bounded fallback when Nemotron cannot return
+a final transcript. Its exact required identity is `medium/cuda/int8_float16`;
+a CPU or differently sized worker fails readiness. Both workers are required
+for the demo-ready four-worker profile even though one successful recognizer
+can complete an individual utterance. The older CPU `small.en` service on port
+`8003` is retained only as an explicit emergency rollback endpoint and does
+not satisfy normal readiness.
 
-```bash
-uv run dimon-inference-gateway
-```
+The revision fields use short safe identifiers containing letters, digits,
+`.`, `_`, `:`, `+`, `@`, or `-`. Start the gateway with
+`uv run dimon-inference-gateway` or the configured systemd unit.
 
-Configure the tunnel origin as `http://127.0.0.1:8891`. Protect the hostname
-with a Cloudflare Access application whose audience matches
-`DIMON_CF_ACCESS_AUDIENCE`. Create separate service-token credentials for each
-team or CI client and keep them in ignored local environment files or the CI
-secret store.
+Set the Cloudflare Tunnel service for `tencentservices.stocksuite.app` to the
+origin `http://127.0.0.1:8891`. This is the only public inference origin; never
+publish the Qwen, Nemotron, or Kokoro ports.
 
-## Teammate remote mode
+## Teammate configuration
 
-A teammate selects the remote provider without installing CUDA or model
-weights:
+Copy `apps/dimon_live/.env.example` to the ignored `apps/dimon_live/.env`, then
+configure remote mode and this origin:
 
 ```dotenv
 DIMON_INFERENCE_MODE=remote
-DIMON_INFERENCE_GATEWAY_URL=https://dimon-inference.stocksuite.app
-DIMON_CF_ACCESS_CLIENT_ID=<service-token-client-id>
-DIMON_CF_ACCESS_CLIENT_SECRET=<service-token-client-secret>
+DIMON_INFERENCE_GATEWAY_URL=https://tencentservices.stocksuite.app
+DIMON_INFERENCE_SERVICE_KEY=<shared-key>
 ```
 
-The three values are required together. The gateway URL must be an HTTPS
-origin. Service-token headers are sent only from the teammate's Dimon backend;
-they must never be placed in frontend JavaScript or committed files.
+The owner sets the key in the host `.env.host` and distributes it out of band
+to authorized teammates. The same Bearer key authenticates HTTP and WebSocket
+requests; it is sent only by
+the Dimon backend, never browser JavaScript. Retiring the tunnel hostname
+removes the public route.
 
 ## Public contracts
 
-All HTTP requests send Cloudflare's `CF-Access-Client-Id` and
-`CF-Access-Client-Secret` headers. They may also send a UUIDv4 in
-`X-Dimon-Correlation-Id`; the gateway creates one when it is missing or invalid
-and returns the accepted value in the same response header.
+HTTP and WebSocket requests send `Authorization: Bearer <shared-key>`. HTTP
+requests may also send a UUIDv4 in `X-Dimon-Correlation-Id`; the gateway
+creates one when missing or invalid and returns the accepted value in the
+response header. Rate limits apply to the shared key as one caller bucket.
 
 `POST /v1/intent` accepts exactly:
 
@@ -83,64 +98,37 @@ and returns the accepted value in the same response header.
 
 Text is limited to 8 KiB. The gateway fixes the model, system prompt, schema,
 and sampling policy. One Qwen request may run, four may wait, and a request has
-a 120-second deadline. Each verified identity may submit 12 intent requests per
-minute. Successful responses include the validated intent, bounded raw output,
-model alias, immutable revision, and model latency.
+a 120-second deadline. The shared key may submit 12 intent requests per minute.
+Successful responses include validated intent, bounded raw output, model alias,
+immutable revision, and model latency.
 
-`WS /v1/transcription` accepts binary 16 kHz mono PCM16 frames followed by:
+`POST /v1/qwen` accepts one of the fixed tasks `transfer`, `stock`,
+`bill_payment`, or `investment_follow_up`, plus bounded text and a request ID.
+Only investment follow-up accepts bounded phase context. The gateway selects
+the Qwen model, system prompt, JSON schema, and sampling settings itself; callers
+cannot send arbitrary model names or prompts. Responses include the task, raw
+model output validated against that task's schema, model revision, and latency.
+These calls share the intent worker and the 12-request-per-minute key limit.
 
-```json
-{"type":"input.commit"}
-```
+`WS /v1/transcription` accepts binary 16 kHz mono PCM16 frames followed by
+`{"type":"input.commit"}`. Server events are `session.ready`,
+`transcript.partial`, `transcript.final`, and `error`, each with
+`protocol_version: 1`. Audio is limited to 4 MiB and 30 seconds. One voice
+session may run and none wait; a competing session receives `VOICE_BUSY`. The
+shared key may start six sessions per minute.
 
-Server events are `session.ready`, `transcript.partial`, `transcript.final`, and
-`error`, each with `protocol_version: 1`. Audio is limited to 4 MiB and 30
-seconds. One voice session may run and none wait; a competing session receives
-`VOICE_BUSY`. Each identity may start six sessions per minute.
+`POST /v1/speech` accepts only fields derived from a committed synthetic result.
+The gateway constructs the sentence and returns a validated mono 16-bit WAV
+no larger than 8 MiB. One synthesis may run, four may wait, and a request has
+a 30-second deadline. The shared key may submit 20 speech requests per minute.
 
-`POST /v1/speech` accepts only fields derived from a committed synthetic result:
+## Health, errors, and observability
 
-```json
-{
-  "request_id": "00000000-0000-4000-8000-000000000002",
-  "status": "EXECUTED_SYNTHETIC_TRANSFER",
-  "action_kind": "BENEFICIARY_TRANSFER",
-  "amount": 5000,
-  "currency": "SGD",
-  "recipient_display": "John Smith",
-  "reference": "rent"
-}
-```
-
-The gateway constructs the sentence. It returns a validated mono 16-bit 16 kHz
-WAV no larger than 8 MiB. One synthesis may run, four may wait, and a request
-has a 30-second deadline. Each identity may submit 20 speech requests per
-minute.
-
-## Health and readiness
-
-Both health routes require Access authentication:
-
-- `GET /health/live` proves the gateway process can authenticate and respond.
-- `GET /health/ready` performs independent, bounded reachability probes for
-  `intent`, `transcription`, and `speech` and returns their configured
-  revisions. It returns HTTP 503 when any capability is unavailable or times
-  out.
-
-The readiness response contains only capability names, `ready`, `reason_code`,
-and safe revision identifiers. It never returns raw ports, model paths, process
-arguments, credentials, GPU details, or exception strings.
-
-Example using placeholder credentials:
-
-```bash
-curl --fail-with-body \
-  -H 'CF-Access-Client-Id: <service-token-client-id>' \
-  -H 'CF-Access-Client-Secret: <service-token-client-secret>' \
-  https://dimon-inference.stocksuite.app/health/ready
-```
-
-## Stable failures and observability
+Both health routes require the shared key. `GET /health/live` checks gateway
+liveness. `GET /health/ready` performs bounded probes for intent,
+transcription, and speech, returning HTTP 503 if any capability is unavailable.
+The response contains only capability names, readiness, safe reason codes, and
+safe revision identifiers.
 
 HTTP failures use this envelope:
 
@@ -154,30 +142,10 @@ HTTP failures use this envelope:
 }
 ```
 
-Stable codes include `UNAUTHORIZED`, `UNTRUSTED_PROXY`, `INVALID_REQUEST`,
+Stable codes include `UNAUTHORIZED`, `INVALID_REQUEST`,
 `INVALID_INFERENCE_REQUEST`, `IDEMPOTENCY_CONFLICT`, `RATE_LIMITED`,
 `CAPACITY_EXCEEDED`, `VOICE_BUSY`, `AUDIO_LIMIT_EXCEEDED`,
 `UTTERANCE_LIMIT_EXCEEDED`, `UPSTREAM_TIMEOUT`, and `UPSTREAM_UNAVAILABLE`.
-Upstream exception text is never returned.
-
-The gateway emits one JSON event per HTTP request and transcription session.
-Events contain the correlation ID, a process-keyed identity hash, method, fixed
-route name, stable outcome code, queue delay, and total latency. They never
-contain an Access token, prompt, transcript, intent, audio, recipient, amount,
-or upstream exception. Bounded in-memory counters track request outcomes,
-failure codes, latency buckets, active work, and queue depth. There is no public
-metrics route in this MVP.
-
-## Verification
-
-The default test suite uses fake upstream adapters and requires no GPU:
-
-```bash
-uv run python -m unittest discover -s services/inference_gateway/tests -p 'test_*.py'
-uv run python -m unittest apps.dimon_live.tests.test_provider_contract -v
-uv run python -m unittest apps.dimon_live.tests.test_remote_inference -v
-```
-
-Run production-credential integration checks only from a trusted machine. Do
-not expose service-token credentials to pull requests from forks or to browser
-code.
+Logs contain a process-keyed shared-caller hash, correlation ID, fixed route,
+outcome, queue delay, and latency; they never contain the key or inference
+content.

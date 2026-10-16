@@ -34,10 +34,12 @@ class Recognizer(Protocol):
     ) -> str: ...
 
 
-class VoiceLifecycle(Protocol):
-    async def acquire(self) -> dict[str, object]: ...
-
+class VoiceLifecycleLease(Protocol):
     async def release(self, *, disconnected: bool = False) -> None: ...
+
+
+class VoiceLifecycle(Protocol):
+    async def acquire(self) -> VoiceLifecycleLease: ...
 
 
 @dataclass(frozen=True)
@@ -47,6 +49,10 @@ class InferenceProviders:
     recognizer: Recognizer
     voice_lifecycle: VoiceLifecycle | None
     synthesizer: Synthesizer
+    stock_extractor: Extractor | None = None
+    followup_interpreter: Any | None = None
+    bill_payment_extractor: Extractor | None = None
+    multi_action_extractor: Extractor | None = None
 
 
 def parse_inference_mode(value: str) -> InferenceMode:

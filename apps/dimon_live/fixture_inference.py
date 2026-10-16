@@ -158,6 +158,45 @@ class FixtureExtractor:
         )
 
 
+class FixtureMultiActionExtractor:
+    """Exact-match, read-only multi-action fixtures for scripted demos."""
+
+    def __init__(self, cases: Mapping[str, tuple[str, dict[str, Any]]]):
+        self.cases = cases
+
+    @classmethod
+    def load(cls, path: Path) -> "FixtureMultiActionExtractor":
+        manifest_path = Path(path).resolve()
+        root = manifest_path.parent
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        records = manifest.get("multi_action_cases", [])
+        if not isinstance(records, list):
+            raise ValueError("multi_action_cases must be a list")
+        from .multi_action import validate_multi_action_intent
+
+        cases: dict[str, tuple[str, dict[str, Any]]] = {}
+        for record in records:
+            if not isinstance(record, dict) or set(record) != {"case_id", "input", "payload"}:
+                raise ValueError("multi-action fixture fields are invalid")
+            payload_path = (root / record["payload"]).resolve()
+            if not payload_path.is_relative_to(root) or not payload_path.is_file():
+                raise ValueError("multi-action fixture payload is outside the catalog")
+            raw = payload_path.read_text(encoding="utf-8")
+            intent = validate_multi_action_intent(raw, text=record["input"])
+            key = normalize_fixture_input(record["input"])
+            if key in cases:
+                raise ValueError("duplicate multi-action fixture input")
+            cases[key] = (raw, intent)
+        return cls(MappingProxyType(cases))
+
+    def extract(self, text: str) -> ExtractedIntent:
+        case = self.cases.get(normalize_fixture_input(text))
+        if case is None:
+            raise FixtureNoMatch()
+        raw, intent = case
+        return ExtractedIntent(dict(intent), raw, 0.0, "multi-action-fixture")
+
+
 def _load_named_cases(path: Path) -> Mapping[str, dict[str, Any]]:
     manifest_path = Path(path).resolve()
     try:
@@ -309,6 +348,16 @@ class FixtureRecognizer:
             await stream.close()
 
 
+class FixtureVoiceLifecycleLease:
+    def __init__(self, status: dict[str, object]):
+        self.status = status
+        self.released = False
+
+    async def release(self, *, disconnected: bool = False) -> None:
+        del disconnected
+        self.released = True
+
+
 class FixtureVoiceLifecycle:
     def __init__(self, record: Mapping[str, Any]):
         self._record = record
@@ -317,16 +366,13 @@ class FixtureVoiceLifecycle:
     def load(cls, path: Path, case_id: str) -> "FixtureVoiceLifecycle":
         return cls(_selected_case(path, case_id))
 
-    async def acquire(self) -> dict[str, object]:
+    async def acquire(self) -> FixtureVoiceLifecycleLease:
         outcome = self._record.get("lifecycle")
         if outcome == "ready":
-            return {"ok": True, "fixture": True}
+            return FixtureVoiceLifecycleLease({"ok": True, "fixture": True})
         if outcome == "error":
             raise _fixture_error(self._record)
         raise ValueError("voice lifecycle fixture is invalid")
-
-    async def release(self, *, disconnected: bool = False) -> None:
-        del disconnected
 
 
 class FixtureSynthesizer:

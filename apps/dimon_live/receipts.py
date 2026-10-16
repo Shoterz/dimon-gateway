@@ -83,7 +83,7 @@ def build_expected_receipt_payload(row: Mapping[str, Any]) -> dict[str, Any]:
         "evidence_bundle": evidence_bundle,
         "lookup_reference": row["lookup_reference"],
     }
-    if row["destination_kind"] == "PAYNOW_MOBILE":
+    if row["destination_kind"] in ("PAYNOW_MOBILE", "UTILITY_BILL"):
         expected["destination_account_id"] = row["destination_account_id"]
     return expected
 
@@ -122,7 +122,7 @@ def build_receipt_record(
     }
     record_fields: dict[str, Any] = {}
     if draft.contract_version == 2:
-        if draft.destination_kind not in ("SAVED_BENEFICIARY", "PAYNOW_MOBILE"):
+        if draft.destination_kind not in ("SAVED_BENEFICIARY", "PAYNOW_MOBILE", "UTILITY_BILL"):
             raise ValueError("invalid destination_kind")
         destination_reference = (
             draft.destination_reference
@@ -137,6 +137,8 @@ def build_receipt_record(
             raise ValueError("PayNow receipt requires lookup_reference")
         if draft.destination_kind == "PAYNOW_MOBILE" and not draft.destination_account_id:
             raise ValueError("PayNow receipt requires destination_account_id")
+        if draft.destination_kind == "UTILITY_BILL" and not draft.destination_account_id:
+            raise ValueError("utility bill receipt requires destination_account_id")
         evidence_bundle = [dict(item) for item in draft.evidence_bundle]
         canonical_json(evidence_bundle)
         payload.update(
@@ -147,7 +149,7 @@ def build_receipt_record(
                 "lookup_reference": draft.lookup_reference,
             }
         )
-        if draft.destination_kind == "PAYNOW_MOBILE":
+        if draft.destination_kind in ("PAYNOW_MOBILE", "UTILITY_BILL"):
             payload["destination_account_id"] = draft.destination_account_id
         record_fields = {
             "destination_kind": draft.destination_kind,

@@ -1,0 +1,26 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["contract_version", "kind", "items"],
+  "properties": {
+    "contract_version": {"type": "integer", "const": 1},
+    "kind": {"type": "string", "const": "MULTI_ACTION"},
+    "items": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 3,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["kind", "evidence"],
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": ["BILL_PAYMENT", "BENEFICIARY_TRANSFER", "STOCK_INVESTMENT"]
+          },
+          "evidence": {"type": "string", "minLength": 1, "maxLength": 500}
+        }
+      }
+    }
+  }
+}

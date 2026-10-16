@@ -1,0 +1,63 @@
+{
+  "gpu": {
+    "final_free_mb": 2213,
+    "safety_reserve_mb": 512,
+    "total_mb": 12282
+  },
+  "measured_at": "2026-10-14T23:44:19.203427+08:00",
+  "schema_version": 1,
+  "workers": [
+    {
+      "calculated_budget_mb": 6528,
+      "compute_type": "Q5_K_M",
+      "device": "cuda",
+      "inference_peak_mb": 5852,
+      "loaded_idle_mb": 5852,
+      "model": "qwen35-9b-abliterated-q5",
+      "name": "qwen",
+      "probe_ok": true,
+      "profile": "qwen35-9b-abliterated-q5-4k",
+      "service": "llama",
+      "worker_pid": 47325
+    },
+    {
+      "calculated_budget_mb": 1536,
+      "compute_type": "fp16",
+      "device": "cuda",
+      "inference_peak_mb": 1196,
+      "loaded_idle_mb": 1196,
+      "model": "nemotron-en",
+      "name": "nemotron",
+      "probe_ok": true,
+      "profile": "nemotron-en",
+      "service": "nemotron",
+      "worker_pid": 25114
+    },
+    {
+      "calculated_budget_mb": 1152,
+      "compute_type": "fp32",
+      "device": "cuda",
+      "inference_peak_mb": 860,
+      "loaded_idle_mb": 810,
+      "model": "kokoro-82m",
+      "name": "kokoro",
+      "probe_ok": true,
+      "profile": "kokoro-82m",
+      "service": "kokoro",
+      "worker_pid": 47364
+    },
+    {
+      "calculated_budget_mb": 1664,
+      "compute_type": "int8_float16",
+      "device": "cuda",
+      "inference_peak_mb": 1324,
+      "loaded_idle_mb": 1164,
+      "model": "medium",
+      "name": "faster_whisper",
+      "probe_ok": true,
+      "profile": "faster-whisper-medium-cuda",
+      "service": "faster_whisper",
+      "worker_pid": 3749739
+    }
+  ]
+}

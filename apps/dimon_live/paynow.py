@@ -37,12 +37,25 @@ _PAYNOW_MENTION = re.compile(r"\bpay\s*now\b", re.IGNORECASE)
 _MOBILE_PROXY_MENTION = re.compile(
     r"(?<!\d)(?:\+65[\s-]*)?(?:\(\s*\d{4}\s*\)|\d{4})[\s-]?\d{4}(?!\d)"
 )
+_DIGIT_WORDS = {
+    "zero": "0", "oh": "0", "one": "1", "two": "2", "three": "3",
+    "four": "4", "five": "5", "six": "6", "seven": "7", "eight": "8",
+    "nine": "9",
+}
+_SPOKEN_MOBILE_PROXY = re.compile(
+    r"\b(?:zero|oh|one|two|three|four|five|six|seven|eight|nine)"
+    r"(?:[\s-]+(?:zero|oh|one|two|three|four|five|six|seven|eight|nine)){7}\b",
+    re.IGNORECASE,
+)
 
 
 def normalize_mobile_proxy(evidence: str) -> str:
     if not isinstance(evidence, str) or not evidence.strip():
         raise PayNowLookupError("INVALID_PAYNOW_PROXY")
     value = evidence.strip()
+    spoken = re.findall(r"[A-Za-z]+", value.casefold())
+    if len(spoken) == 8 and all(word in _DIGIT_WORDS for word in spoken):
+        return "".join(_DIGIT_WORDS[word] for word in spoken)
     if _ALLOWED_PROXY.fullmatch(value) is None:
         raise PayNowLookupError("INVALID_PAYNOW_PROXY")
     if "+" in value and not value.startswith("+65"):
@@ -67,7 +80,8 @@ def derive_mobile_proxy_from_text(value: str) -> tuple[str | None, str | None]:
 
     if not isinstance(value, str) or _PAYNOW_MENTION.search(value) is None:
         return None, None
-    matches = list(_MOBILE_PROXY_MENTION.finditer(value))
+    matches = [*_MOBILE_PROXY_MENTION.finditer(value), *_SPOKEN_MOBILE_PROXY.finditer(value)]
+    matches.sort(key=lambda match: match.start())
     if not matches:
         return None, None
     if len(matches) != 1:

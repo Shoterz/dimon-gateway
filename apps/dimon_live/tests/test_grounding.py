@@ -131,5 +131,31 @@ class GroundingTests(unittest.TestCase):
         )
 
 
+
+class SpokenCentsTests(unittest.TestCase):
+    def test_spoken_dollars_and_cents(self):
+        for text, minor in (
+            ("Send two dollars fifty from savings to John", 250),
+            ("send 2 dollars 50 to John", 250),
+            ("send two dollars and fifty cents to John", 250),
+            ("send 3 dollars 75 cents to Alicia", 375),
+            ("send fifty cents to John", 50),
+            ("send twenty five dollars to John", 2500),
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(derive_amount_from_text(text)[0], minor)
+                amount, evidence = derive_amount_from_text(text)
+                self.assertEqual(verify_amount(text, amount, evidence), minor)
+
+    def test_counts_after_dollars_are_not_cents(self):
+        self.assertEqual(derive_amount_from_text("send ten dollars fifty times")[0], 1000)
+
+    def test_two_fifty_is_asked_not_guessed(self):
+        # 2.50 or 250? Never 52.
+        with self.assertRaises(GroundingError) as raised:
+            derive_amount_from_text("send two fifty to John")
+        self.assertEqual(raised.exception.reason_code, "AMBIGUOUS_AMOUNT")
+
+
 if __name__ == "__main__":
     unittest.main()

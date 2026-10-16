@@ -2,16 +2,21 @@
 
 from __future__ import annotations
 
-import ipaddress
 import re
 from collections.abc import Mapping
-from dataclasses import dataclass
-from ipaddress import IPv4Address, IPv6Address
+from dataclasses import dataclass, field
+from pathlib import Path
 from urllib.parse import urlparse
 
 
-IPAddress = IPv4Address | IPv6Address
 _REVISION = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:+@-]{0,127}$")
+_SERVICE_KEY = re.compile(r"^[\x21-\x7e]{32,256}$")
+_SYSTEMD_UNIT = re.compile(r"^[A-Za-z0-9_.@:-]+\.service$")
+_DEFAULT_GPU_RESET_UNITS = (
+    "dimon-faster-whisper-medium.service",
+    "jarvis-nemotron.service",
+    "gpu-overlord-stack.service",
+)
 
 
 def _required(env: Mapping[str, str], key: str) -> str:
@@ -21,14 +26,15 @@ def _required(env: Mapping[str, str], key: str) -> str:
     return value
 
 
-def _loopback_address(value: str, label: str) -> IPAddress:
+def _loopback_address(value: str, label: str) -> None:
+    import ipaddress
+
     try:
         address = ipaddress.ip_address(value)
     except ValueError as exc:
         raise ValueError(f"{label} must be a loopback IP address") from exc
     if not address.is_loopback:
         raise ValueError(f"{label} must be a loopback IP address")
-    return address
 
 
 def _loopback_url(value: str, label: str, schemes: set[str]) -> str:
@@ -55,20 +61,35 @@ def _revision(env: Mapping[str, str], key: str) -> str:
 class GatewayConfig:
     bind_host: str
     bind_port: int
-    trusted_proxies: frozenset[IPAddress]
-    access_audience: str
-    access_issuer: str
-    jwks_url: str
-    jwks_cache_seconds: float
-    jwks_timeout_seconds: float
+    service_key: str = field(repr=False)
     qwen_api_base: str
     qwen_model: str
     qwen_revision: str
     max_raw_output_bytes: int
     nemotron_url: str
+    nemotron_control_socket: Path | None
     nemotron_revision: str
     kokoro_url: str
     kokoro_revision: str
+    transcription_backend: str
+    whisper_url: str | None
+    whisper_revision: str | None
+    gpu_overlord_socket: Path
+    gpu_reset_units: tuple[str, ...]
+
+    @property
+    def transcription_url(self) -> str:
+        if self.transcription_backend in {"whisper_cpu", "dual"}:
+            assert self.whisper_url is not None
+            return self.whisper_url
+        return self.nemotron_url
+
+    @property
+    def transcription_revision(self) -> str:
+        if self.transcription_backend in {"whisper_cpu", "dual"}:
+            assert self.whisper_revision is not None
+            return self.whisper_revision
+        return self.nemotron_revision
 
     @classmethod
     def from_env(cls, env: Mapping[str, str]) -> "GatewayConfig":
@@ -81,37 +102,11 @@ class GatewayConfig:
         if not 1 <= bind_port <= 65535:
             raise ValueError("DIMON_GATEWAY_PORT must be between 1 and 65535")
 
-        proxy_values = _required(env, "DIMON_GATEWAY_TRUSTED_PROXIES").split(",")
-        trusted_proxies = frozenset(
-            _loopback_address(value.strip(), "DIMON_GATEWAY_TRUSTED_PROXIES")
-            for value in proxy_values
-            if value.strip()
-        )
-        if not trusted_proxies:
-            raise ValueError("DIMON_GATEWAY_TRUSTED_PROXIES is required")
-
-        audience = _required(env, "DIMON_CF_ACCESS_AUDIENCE")
-        issuer = _required(env, "DIMON_CF_ACCESS_ISSUER").rstrip("/")
-        parsed_issuer = urlparse(issuer)
-        if (
-            parsed_issuer.scheme != "https"
-            or parsed_issuer.hostname is None
-            or not parsed_issuer.hostname.endswith(".cloudflareaccess.com")
-            or parsed_issuer.path not in {"", "/"}
-            or parsed_issuer.params
-            or parsed_issuer.query
-            or parsed_issuer.fragment
-            or parsed_issuer.username is not None
-        ):
-            raise ValueError("DIMON_CF_ACCESS_ISSUER must be an HTTPS Cloudflare Access origin")
-
-        try:
-            cache_seconds = float(env.get("DIMON_ACCESS_JWKS_CACHE_SECONDS", "300"))
-            timeout_seconds = float(env.get("DIMON_ACCESS_JWKS_TIMEOUT_SECONDS", "3"))
-        except ValueError as exc:
-            raise ValueError("JWKS cache and timeout values must be numeric") from exc
-        if not 1 <= cache_seconds <= 3600 or not 0.1 <= timeout_seconds <= 30:
-            raise ValueError("JWKS cache or timeout is outside its safe range")
+        service_key = _required(env, "DIMON_INFERENCE_SERVICE_KEY")
+        if _SERVICE_KEY.fullmatch(service_key) is None:
+            raise ValueError(
+                "DIMON_INFERENCE_SERVICE_KEY must be 32-256 printable ASCII characters without spaces"
+            )
 
         qwen = _loopback_url(
             env.get("DIMON_QWEN_API_BASE", "http://127.0.0.1:8080/v1").strip(),
@@ -135,28 +130,69 @@ class GatewayConfig:
             "DIMON_NEMOTRON_URL",
             {"ws", "wss"},
         )
+        control_socket_value = env.get("DIMON_NEMOTRON_CONTROL_SOCKET", "").strip()
+        control_socket = Path(control_socket_value) if control_socket_value else None
+        if control_socket is not None and not control_socket.is_absolute():
+            raise ValueError("DIMON_NEMOTRON_CONTROL_SOCKET must be an absolute path")
         nemotron_revision = _revision(env, "DIMON_NEMOTRON_REVISION")
+        transcription_backend = (
+            env.get("DIMON_GATEWAY_STT_BACKEND", "nemotron").strip().lower()
+            or "nemotron"
+        )
+        if transcription_backend not in {"nemotron", "whisper_cpu", "dual"}:
+            raise ValueError(
+                "DIMON_GATEWAY_STT_BACKEND must be nemotron, whisper_cpu, or dual"
+            )
+        whisper_url: str | None = None
+        whisper_revision: str | None = None
+        if transcription_backend in {"whisper_cpu", "dual"}:
+            whisper_url = _loopback_url(
+                env.get("DIMON_WHISPER_URL", "ws://127.0.0.1:8003/ws").strip(),
+                "DIMON_WHISPER_URL",
+                {"ws", "wss"},
+            )
+            whisper_revision = _revision(env, "DIMON_WHISPER_REVISION")
         kokoro = _loopback_url(
             env.get("DIMON_KOKORO_URL", "http://127.0.0.1:3001").strip(),
             "DIMON_KOKORO_URL",
             {"http", "https"},
         )
         kokoro_revision = _revision(env, "DIMON_KOKORO_REVISION")
+        gpu_overlord_socket_value = _required(env, "DIMON_GPU_OVERLORD_SOCKET")
+        gpu_overlord_socket = Path(gpu_overlord_socket_value)
+        if not gpu_overlord_socket.is_absolute():
+            raise ValueError("DIMON_GPU_OVERLORD_SOCKET must be an absolute path")
+        raw_reset_units = env.get(
+            "DIMON_GPU_RESET_UNITS", ",".join(_DEFAULT_GPU_RESET_UNITS)
+        )
+        gpu_reset_units = tuple(
+            unit.strip() for unit in raw_reset_units.split(",") if unit.strip()
+        )
+        if (
+            not gpu_reset_units
+            or len(gpu_reset_units) > 16
+            or len(set(gpu_reset_units)) != len(gpu_reset_units)
+            or any(_SYSTEMD_UNIT.fullmatch(unit) is None for unit in gpu_reset_units)
+        ):
+            raise ValueError(
+                "DIMON_GPU_RESET_UNITS must be unique comma-separated systemd service names"
+            )
         return cls(
             bind_host=bind_host,
             bind_port=bind_port,
-            trusted_proxies=trusted_proxies,
-            access_audience=audience,
-            access_issuer=issuer,
-            jwks_url=f"{issuer}/cdn-cgi/access/certs",
-            jwks_cache_seconds=cache_seconds,
-            jwks_timeout_seconds=timeout_seconds,
+            service_key=service_key,
             qwen_api_base=qwen,
             qwen_model=qwen_model,
             qwen_revision=qwen_revision,
             max_raw_output_bytes=max_raw_output_bytes,
             nemotron_url=nemotron,
+            nemotron_control_socket=control_socket,
             nemotron_revision=nemotron_revision,
             kokoro_url=kokoro,
             kokoro_revision=kokoro_revision,
+            transcription_backend=transcription_backend,
+            whisper_url=whisper_url,
+            whisper_revision=whisper_revision,
+            gpu_overlord_socket=gpu_overlord_socket,
+            gpu_reset_units=gpu_reset_units,
         )

@@ -2,22 +2,18 @@ from __future__ import annotations
 
 import asyncio
 import json
-import time
 import unittest
 from dataclasses import replace
 from uuid import uuid4
 
 import httpx
-import jwt
-from cryptography.hazmat.primitives.asymmetric import rsa
 
 from apps.dimon_live.model_adapter import ExtractedIntent
 from services.inference_gateway.app import create_gateway_app
-from services.inference_gateway.auth import AccessTokenVerifier
 from services.inference_gateway.config import GatewayConfig
 from services.inference_gateway.idempotency import IdempotencyStore
 from services.inference_gateway.limits import BoundedExecutor, SlidingWindowLimiter
-from services.inference_gateway.tests.test_auth import StaticJwksClient, valid_env
+from services.inference_gateway.tests.test_auth import valid_env
 from services.inference_gateway.upstreams import QwenIntentUpstream
 
 
@@ -70,26 +66,11 @@ class FakeIntentUpstream:
 class IntentEndpointTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
-        cls.private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
         cls.config = GatewayConfig.from_env(valid_env())
 
     def token(self, *, subject: str = "user-123") -> str:
-        now = int(time.time())
-        return jwt.encode(
-            {
-                "type": "app",
-                "iss": self.config.access_issuer,
-                "aud": [self.config.access_audience],
-                "iat": now - 1,
-                "nbf": now - 1,
-                "exp": now + 60,
-                "sub": subject,
-                "email": "friend@example.com",
-            },
-            self.private_key,
-            algorithm="RS256",
-            headers={"kid": "test-key"},
-        )
+        del subject
+        return self.config.service_key
 
     def make_app(
         self,
@@ -101,13 +82,8 @@ class IntentEndpointTests(unittest.TestCase):
         config: GatewayConfig | None = None,
     ):
         selected_config = config or self.config
-        verifier = AccessTokenVerifier(
-            selected_config,
-            jwks_client=StaticJwksClient(self.private_key.public_key()),
-        )
         return create_gateway_app(
             selected_config,
-            verifier=verifier,
             intent_upstream=upstream or FakeIntentUpstream(),
             intent_executor=executor,
             intent_limiter=limiter,
@@ -117,7 +93,8 @@ class IntentEndpointTests(unittest.TestCase):
     async def request(self, app, *, payload=None, content=None, token: str | None = "default"):
         headers = {}
         if token is not None:
-            headers["cf-access-jwt-assertion"] = self.token() if token == "default" else token
+            key = self.token() if token == "default" else token
+            headers["authorization"] = f"Bearer {key}"
         transport = httpx.ASGITransport(app=app, client=("127.0.0.1", 1234))
         async with httpx.AsyncClient(transport=transport, base_url="http://gateway.test") as client:
             return await client.post(

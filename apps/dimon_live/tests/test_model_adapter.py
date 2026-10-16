@@ -247,5 +247,247 @@ class QwenTransferExtractorTests(unittest.TestCase):
             extractor.extract(GOLDEN_REQUEST)
 
 
+class QwenStockExtractorTests(unittest.TestCase):
+    def test_stock_validation_expands_grounded_bare_count_to_exact_share_phrase(self):
+        from apps.dimon_live.model_adapter import validate_stock_intent
+
+        intent = {
+            "contract_version": 2,
+            "kind": "STOCK_INVESTMENT",
+            "instrument_label": "NVIDIA",
+            "instrument_evidence": "Nvidia",
+            "objective": "GENERAL_ACQUISITION",
+            "size_kind": "QUANTITY",
+            "quantity": 1,
+            "quantity_evidence": "one",
+            "allocation_evidence": None,
+        }
+
+        validated = validate_stock_intent(
+            json.dumps(intent), text="buy one stock in Nvidia"
+        )
+
+        self.assertEqual(validated["quantity"], 1)
+        self.assertEqual(validated["quantity_evidence"], "one stock")
+
+    def test_stock_extractor_returns_grounded_company_mention(self):
+        from apps.dimon_live.model_adapter import QwenStockIntentExtractor
+
+        intent = {
+            "contract_version": 2,
+            "kind": "STOCK_INVESTMENT",
+            "instrument_label": "NVIDIA",
+            "instrument_evidence": "NVIDIA stock",
+            "objective": "GENERAL_ACQUISITION",
+            "size_kind": "ALLOCATION",
+            "quantity": None,
+            "quantity_evidence": None,
+            "allocation_evidence": "five hundred dollars",
+        }
+        calls = []
+
+        def transport(url, payload, timeout):
+            calls.append((url, payload, timeout))
+            return {
+                "choices": [{
+                    "finish_reason": "stop",
+                    "message": {"role": "assistant", "content": json.dumps(intent)},
+                }]
+            }
+
+        result = QwenStockIntentExtractor(transport=transport).extract(
+            "I want you to help me buy five hundred dollars worth of NVIDIA stock."
+        )
+
+        self.assertEqual(result.intent, intent)
+        self.assertEqual(calls[0][0], "http://127.0.0.1:8080/v1/chat/completions")
+        schema = calls[0][1]["response_format"]["json_schema"]["schema"]
+        self.assertFalse(schema["additionalProperties"])
+        self.assertIn("instrument_evidence", schema["required"])
+        self.assertIn("never return a ticker", calls[0][1]["messages"][0]["content"])
+
+    def test_stock_validation_rejects_untrusted_extra_fields(self):
+        from apps.dimon_live.model_adapter import InvalidModelOutput, validate_stock_intent
+
+        invalid = {
+            "contract_version": 1,
+            "kind": "STOCK_INVESTMENT",
+            "instrument_label": "NVDA",
+            "instrument_evidence": "NVIDIA",
+            "objective": "GENERAL_ACQUISITION",
+            "size_kind": "UNKNOWN",
+            "quantity": None,
+            "quantity_evidence": None,
+            "allocation_evidence": None,
+            "symbol": "NVDA",
+        }
+
+        with self.assertRaisesRegex(InvalidModelOutput, "unexpected fields"):
+            validate_stock_intent(json.dumps(invalid))
+
+
+class QwenBillPaymentExtractorTests(unittest.TestCase):
+    def test_extractor_returns_only_a_bounded_evidence_proposal(self):
+        from apps.dimon_live.model_adapter import QwenBillPaymentExtractor
+
+        intent = {
+            "contract_version": 1,
+            "kind": "BILL_PAYMENT",
+            "biller_label": "Singapore Power",
+            "biller_evidence": "Singapore Power bill",
+            "amount_evidence": "$120",
+            "currency": "SGD",
+            "currency_evidence": "$",
+            "source_account_label": "savings",
+            "source_account_evidence": "savings",
+            "requested_execution_date": None,
+            "execution_date_evidence": None,
+        }
+        calls = []
+
+        def transport(url, payload, timeout):
+            calls.append((url, payload, timeout))
+            return {
+                "choices": [{
+                    "finish_reason": "stop",
+                    "message": {"role": "assistant", "content": json.dumps(intent)},
+                }]
+            }
+
+        result = QwenBillPaymentExtractor(transport=transport).extract(
+            "Pay my Singapore Power bill $120 from savings."
+        )
+
+        self.assertEqual(result.intent, intent)
+        schema = calls[0][1]["response_format"]["json_schema"]["schema"]
+        self.assertFalse(schema["additionalProperties"])
+        self.assertEqual(set(schema["required"]), set(intent))
+        prompt = calls[0][1]["messages"][0]["content"]
+        self.assertIn("exact substrings", prompt)
+        self.assertIn("Never approve", prompt)
+
+    def test_validation_allows_missing_biller_or_amount_for_clarification(self):
+        from apps.dimon_live.model_adapter import validate_bill_payment_intent
+
+        missing_biller = {
+            "contract_version": 1,
+            "kind": "BILL_PAYMENT",
+            "biller_label": None,
+            "biller_evidence": None,
+            "amount_evidence": "$120",
+            "currency": "SGD",
+            "currency_evidence": "$",
+            "source_account_label": None,
+            "source_account_evidence": None,
+            "requested_execution_date": None,
+            "execution_date_evidence": None,
+        }
+        missing_amount = {**missing_biller, "biller_label": "SP", "biller_evidence": "SP"}
+        missing_amount["amount_evidence"] = None
+
+        self.assertEqual(validate_bill_payment_intent(json.dumps(missing_biller)), missing_biller)
+        self.assertEqual(validate_bill_payment_intent(json.dumps(missing_amount)), missing_amount)
+
+    def test_validation_rejects_authority_fields_and_unpaired_evidence(self):
+        from apps.dimon_live.model_adapter import InvalidModelOutput, validate_bill_payment_intent
+
+        base = {
+            "contract_version": 1,
+            "kind": "BILL_PAYMENT",
+            "biller_label": "SP",
+            "biller_evidence": "SP",
+            "amount_evidence": "$120",
+            "currency": "SGD",
+            "currency_evidence": "$",
+            "source_account_label": None,
+            "source_account_evidence": None,
+            "requested_execution_date": None,
+            "execution_date_evidence": None,
+        }
+        with self.assertRaises(InvalidModelOutput):
+            validate_bill_payment_intent(json.dumps({**base, "execute_now": True}))
+        with self.assertRaises(InvalidModelOutput):
+            validate_bill_payment_intent(json.dumps({**base, "biller_evidence": None}))
+
+
+class QwenInvestmentFollowUpTests(unittest.TestCase):
+    def test_follow_up_interpreter_maps_natural_market_language_to_bounded_action(self):
+        from apps.dimon_live.model_adapter import QwenInvestmentFollowUpInterpreter
+
+        output = {
+            "contract_version": 3,
+            "kind": "INVESTMENT_FOLLOW_UP",
+            "actions": ["BUY_NOW"],
+            "size_kind": "UNKNOWN",
+            "quantity": None,
+            "quantity_evidence": None,
+            "allocation_evidence": None,
+        }
+        calls = []
+
+        def transport(url, payload, timeout):
+            calls.append((url, payload, timeout))
+            return {
+                "choices": [{
+                    "finish_reason": "stop",
+                    "message": {"role": "assistant", "content": json.dumps(output)},
+                }]
+            }
+
+        result = QwenInvestmentFollowUpInterpreter(transport=transport).interpret(
+            "buy at market when market opens",
+            phase="ORDER_STYLE",
+            question="Buy now at market, or set a maximum price?",
+            state={"symbol": "NVDA", "price": "238.90", "quote_currency": "USD"},
+        )
+
+        self.assertEqual(result.actions, ("BUY_NOW",))
+        self.assertEqual(calls[0][0], "http://127.0.0.1:8080/v1/chat/completions")
+        self.assertEqual(calls[0][1]["response_format"]["type"], "json_schema")
+        self.assertIn("Never approve", calls[0][1]["messages"][0]["content"])
+
+    def test_follow_up_interpreter_preserves_two_ordered_bounded_actions(self):
+        from apps.dimon_live.model_adapter import QwenInvestmentFollowUpInterpreter
+
+        output = {
+            "contract_version": 3,
+            "kind": "INVESTMENT_FOLLOW_UP",
+            "actions": ["USE_AVAILABLE_FUNDS", "BUY_NOW"],
+            "size_kind": "UNKNOWN",
+            "quantity": None,
+            "quantity_evidence": None,
+            "allocation_evidence": None,
+        }
+
+        def transport(url, payload, timeout):
+            return {
+                "choices": [{
+                    "finish_reason": "stop",
+                    "message": {"role": "assistant", "content": json.dumps(output)},
+                }]
+            }
+
+        result = QwenInvestmentFollowUpInterpreter(transport=transport).interpret(
+            "Lower it to what I can afford and execute it on market.",
+            phase="FUNDING",
+            question="Use the available balance, choose another funding account, or cancel?",
+            state={"symbol": "NVDA", "price": "238.90", "quote_currency": "USD"},
+        )
+
+        self.assertEqual(result.actions, ("USE_AVAILABLE_FUNDS", "BUY_NOW"))
+
+    def test_follow_up_validation_rejects_execution_authority(self):
+        from apps.dimon_live.model_adapter import InvalidModelOutput, validate_follow_up_intent
+
+        invalid = {
+            "contract_version": 2,
+            "kind": "INVESTMENT_FOLLOW_UP",
+            "actions": ["EXECUTE_NOW"],
+        }
+
+        with self.assertRaises(InvalidModelOutput):
+            validate_follow_up_intent(json.dumps(invalid))
+
+
 if __name__ == "__main__":
     unittest.main()

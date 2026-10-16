@@ -10,12 +10,16 @@ requires-python = ">=3.12,<3.13"
 dependencies = [
     "fastapi>=0.136,<0.137",
     "httpx>=0.28,<0.29",
+    "numpy>=2,<3",
+    "opencv-python-headless>=4.10,<5",
     "PyJWT[crypto]>=2.12,<3",
     "pydantic>=2.13,<3",
     "python-dotenv>=1.1,<2",
     "PyYAML>=6,<7",
     "uvicorn[standard]>=0.46,<0.47",
     "websockets>=16,<17",
+    "yfinance>=1.0,<2",
+    "onnxruntime>=1.20,<2",
 ]
 
 [project.scripts]
@@ -32,7 +36,7 @@ dev = [
 packages = ["apps", "services"]
 
 [tool.pytest.ini_options]
-testpaths = ["apps/dimon_live/tests", "tests"]
+testpaths = ["apps/dimon_live/tests", "services", "tests"]
 
 [tool.uv]
 default-groups = ["dev"]

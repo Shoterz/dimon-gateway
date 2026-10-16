@@ -33,10 +33,18 @@ _CACHE_PARTS = {
     "venv",
 }
 _MAX_PUBLICATION_FILE_BYTES = 2 * 1024 * 1024
+_PUBLIC_AUDIO_ASSETS = {
+    Path("apps/dimon_live/static/audio/wake-greeting-v1.wav"),
+    Path("apps/dimon_live/static/audio/voice-enrollment-confirmation-v1.wav"),
+}
 _PERSONAL_HOME = re.compile(r"/home/(?!<user>(?:/|$)|\$\{?[A-Z_]+\}?/)[A-Za-z0-9._-]+(?:/|$)")
 _CREDENTIAL_ASSIGNMENT = re.compile(
     r"(?im)^\s*[A-Z0-9_.-]*(?:SECRET|TOKEN|PASSWORD|API[_-]?KEY)"
     r"[A-Z0-9_.-]*[ \t]*[:=][ \t]*['\"]?([A-Za-z0-9+/_.=-]{20,})"
+)
+_SERVICE_KEY_ASSIGNMENT = re.compile(
+    r"(?m)^\s*[A-Z][A-Z0-9_.-]*SERVICE[_-]?KEY[A-Z0-9_.-]*"
+    r"[ \t]*[:=][ \t]*['\"]?([A-Za-z0-9+/_.=-]{8,})"
 )
 _SECRET_PATTERNS = (
     (re.compile(r"cfast_[A-Za-z0-9]{48}"), "credential-like Cloudflare service secret"),
@@ -61,11 +69,15 @@ def path_violations(path: Path) -> list[str]:
     suffix = normalized.suffix.lower()
     reasons: list[str] = []
 
-    if normalized.name == ".env" or (
-        normalized.name.endswith(".env") and normalized.name != ".env.example"
+    if (
+        normalized.name == ".env"
+        or (normalized.name.endswith(".env") and normalized.name != ".env.example")
     ):
         reasons.append("active environment file")
-    if normalized.name.startswith(".env.") and normalized.name != ".env.example":
+    if (
+        normalized.name.startswith(".env.")
+        and normalized.name != ".env.example"
+    ):
         reasons.append("active environment file")
     if "runtime" in parts:
         reasons.append("runtime data")
@@ -73,7 +85,7 @@ def path_violations(path: Path) -> list[str]:
         reasons.append("database")
     if suffix in _MODEL_SUFFIXES:
         reasons.append("model artifact")
-    if suffix in _AUDIO_SUFFIXES:
+    if suffix in _AUDIO_SUFFIXES and normalized not in _PUBLIC_AUDIO_ASSETS:
         reasons.append("generated audio")
     if parts & _CACHE_PARTS or suffix in {".pyc", ".pyo"}:
         reasons.append("cache")
@@ -105,7 +117,14 @@ def content_violations(content: str) -> list[str]:
             reasons.append(reason)
     if _CREDENTIAL_ASSIGNMENT.search(content):
         reasons.append("credential-like assigned value")
+    if _SERVICE_KEY_ASSIGNMENT.search(content):
+        reasons.append("credential-like assigned value")
     return reasons
+
+
+def _content_for_path(content: str, path: Path) -> str:
+    """Return content prepared for publication scanning."""
+    return content
 
 
 def _git_candidates(root: Path) -> list[Path] | None:
@@ -215,7 +234,7 @@ def inspect_candidates(root: Path, candidates: Iterable[Path]) -> list[Violation
             content = candidate.read_text(encoding="utf-8")
         except (UnicodeDecodeError, OSError):
             continue
-        for reason in content_violations(content):
+        for reason in content_violations(_content_for_path(content, relative)):
             violations.append(Violation(relative, reason))
     return violations
 
@@ -259,8 +278,75 @@ def inspect_committed_tree(
             content = completed.stdout.decode("utf-8")
         except UnicodeDecodeError:
             continue
-        for reason in content_violations(content):
+        for reason in content_violations(_content_for_path(content, relative)):
             violations.append(Violation(relative, reason))
+    return violations
+
+
+def history_candidates(root: Path, treeish: str = "HEAD") -> list[tuple[str, Path]]:
+    """List unique historical blobs and one repository path for each blob."""
+
+    completed = subprocess.run(
+        ["git", "-C", str(root), "rev-list", "--objects", treeish],
+        check=False,
+        capture_output=True,
+    )
+    if completed.returncode != 0:
+        raise RuntimeError("unable to inspect Git history")
+    objects: list[tuple[str, Path]] = []
+    for line in completed.stdout.splitlines():
+        object_name, separator, raw_path = line.partition(b" ")
+        if not separator or not raw_path:
+            continue
+        objects.append(
+            (
+                object_name.decode("ascii"),
+                Path(raw_path.decode("utf-8", errors="surrogateescape")),
+            )
+        )
+    return objects
+
+
+def inspect_history(
+    root: Path, candidates: Iterable[tuple[str, Path]]
+) -> list[Violation]:
+    """Inspect every unique path-bearing blob reachable from HEAD."""
+
+    violations: list[Violation] = []
+    for object_name, relative in candidates:
+        kind = subprocess.run(
+            ["git", "-C", str(root), "cat-file", "-t", object_name],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if kind.returncode != 0 or kind.stdout.strip() != "blob":
+            continue
+        display_path = Path(f"{object_name[:12]}:{relative.as_posix()}")
+        path_reasons = path_violations(relative)
+        for reason in path_reasons:
+            violations.append(Violation(display_path, reason))
+        if path_reasons:
+            continue
+        completed = subprocess.run(
+            ["git", "-C", str(root), "cat-file", "blob", object_name],
+            check=False,
+            capture_output=True,
+        )
+        if completed.returncode != 0:
+            violations.append(Violation(display_path, "unreadable historical blob"))
+            continue
+        if len(completed.stdout) > _MAX_PUBLICATION_FILE_BYTES:
+            violations.append(
+                Violation(display_path, "file exceeds publication size limit")
+            )
+            continue
+        try:
+            content = completed.stdout.decode("utf-8")
+        except UnicodeDecodeError:
+            continue
+        for reason in content_violations(_content_for_path(content, relative)):
+            violations.append(Violation(display_path, reason))
     return violations
 
 
@@ -278,13 +364,22 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="inspect paths and blobs exactly as committed at HEAD",
     )
+    modes.add_argument(
+        "--history",
+        action="store_true",
+        help="inspect every path-bearing blob reachable from HEAD",
+    )
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     root = args.root.resolve()
-    if args.committed:
+    if args.history:
+        candidates = history_candidates(root)
+        violations = inspect_history(root, candidates)
+        subject = "historical blob(s)"
+    elif args.committed:
         candidates = committed_candidates(root)
         violations = inspect_committed_tree(root, candidates)
         subject = "committed file(s)"

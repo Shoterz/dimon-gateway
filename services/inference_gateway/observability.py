@@ -62,7 +62,7 @@ class EndpointProbe:
 def default_readiness_probes(config) -> dict[str, ReadinessProbe]:
     return {
         "intent": EndpointProbe(config.qwen_api_base),
-        "transcription": EndpointProbe(config.nemotron_url),
+        "transcription": EndpointProbe(config.transcription_url),
         "speech": EndpointProbe(config.kokoro_url),
     }
 
@@ -148,12 +148,13 @@ class GatewayObservability:
     def record_http(self, request, *, outcome_code: str, latency_ms: float) -> None:
         route = request.url.path if request.url.path in {
             "/v1/intent",
+            "/v1/qwen",
             "/v1/speech",
             "/health/live",
             "/health/ready",
         } else "OTHER"
         safe_outcome = outcome_code if _safe_code(outcome_code) else "INTERNAL_ERROR"
-        identity = getattr(request.state, "access_identity", None)
+        identity = getattr(request.state, "service_identity", None)
         subject = getattr(identity, "subject", None)
         event = {
             "event": "gateway_request",

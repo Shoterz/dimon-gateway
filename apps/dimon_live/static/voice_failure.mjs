@@ -16,10 +16,17 @@ export function describeVoiceFailure(stage, error) {
 }
 
 export function reportVoiceFailure(details, fetchImpl = fetch) {
+  const body = {
+    stage: details.stage,
+    error_name: SAFE_ERROR_NAME.test(details.errorName || "") ? details.errorName : "UnknownError",
+  };
+  if (typeof details.requestId === "string" && /^[0-9a-f-]{36}$/i.test(details.requestId)) {
+    body.request_id = details.requestId;
+  }
   return fetchImpl("/api/voice/diagnostics", {
     method: "POST",
     headers: {"Content-Type": "application/json"},
-    body: JSON.stringify({stage: details.stage, error_name: details.errorName}),
+    body: JSON.stringify(body),
     keepalive: true,
   }).catch(() => undefined);
 }

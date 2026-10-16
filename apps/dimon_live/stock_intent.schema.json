@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Dimon Live stock intent v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contract_version",
+    "kind",
+    "instrument_label",
+    "instrument_evidence",
+    "objective",
+    "size_kind",
+    "quantity",
+    "quantity_evidence",
+    "allocation_evidence"
+  ],
+  "properties": {
+    "contract_version": {"const": 2},
+    "kind": {"enum": ["STOCK_INVESTMENT", "STOCK_RESEARCH", "NOT_STOCK"]},
+    "instrument_label": {"type": ["string", "null"]},
+    "instrument_evidence": {"type": ["string", "null"]},
+    "objective": {"enum": ["GENERAL_ACQUISITION", "DIVIDEND_INCOME", "NOT_APPLICABLE"]},
+    "size_kind": {"enum": ["QUANTITY", "ALLOCATION", "UNKNOWN"]},
+    "quantity": {"type": ["integer", "null"], "minimum": 1, "maximum": 100000},
+    "quantity_evidence": {"type": ["string", "null"]},
+    "allocation_evidence": {"type": ["string", "null"]}
+  }
+}

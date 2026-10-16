@@ -12,13 +12,13 @@ Use Python 3.12 and the committed `uv.lock`:
 
 ```bash
 uv sync --locked --group dev
-cp .env.example apps/dimon_live/.env
-uv run dimon-dev
+uv run dimon-serve
 ```
 
-Open <http://127.0.0.1:8890>. `dimon-dev` selects `fixture` unless
-`DIMON_INFERENCE_MODE` is already set. Model weights, CUDA, Docker, and network
-access are not required for this path.
+Open <http://127.0.0.1:8890>. Fixture mode is the credential-free default.
+Remote mode uses an ignored local `apps/dimon_live/.env` copied from the
+example and a service key supplied by the host operator. Model weights and CUDA
+are not required on teammate machines.
 
 Docker is intentionally optional for this checkpoint. The laptop application
 has one Python environment and local SQLite files, so `uv` is the smaller daily
@@ -30,7 +30,7 @@ changing the provider contracts.
 | Mode | Use it for | Command | Current status |
 | --- | --- | --- | --- |
 | `fixture` | Daily feature work, UI work, CI, and deterministic demos | `uv run dimon-dev` | Implemented and the default |
-| `remote` | Testing the application against the team GPU host | `DIMON_INFERENCE_MODE=remote uv run dimon-dev` | Reserved; returns `REMOTE_PROVIDER_UNAVAILABLE` until the gateway client checkpoint lands |
+| `remote` | Using the hosted team inference services | `uv run dimon-serve` with an ignored local `.env` | Implemented; requires a rotated service key |
 | `local` | GPU-host staging and the judge-facing deployment | `DIMON_INFERENCE_MODE=local uv run dimon-serve` | Implemented; requires the three loopback model services |
 
 There is no automatic fallback between modes. A fixture mismatch cannot call a
@@ -86,13 +86,12 @@ The gateway checkpoint will consume these server-side variables:
 
 | Variable | Purpose |
 | --- | --- |
-| `DIMON_INFERENCE_GATEWAY_URL` | Bounded gateway origin, normally `https://dimon-inference.stocksuite.app` |
-| `DIMON_CF_ACCESS_CLIENT_ID` | Cloudflare Access service credential ID |
-| `DIMON_CF_ACCESS_CLIENT_SECRET` | Cloudflare Access service credential secret |
+| `DIMON_INFERENCE_GATEWAY_URL` | Bounded gateway origin, `https://tencentservices.stocksuite.app` for teammate mode |
+| `DIMON_INFERENCE_SERVICE_KEY` | Shared Bearer key used by the remote client and host gateway |
 
-Keep credential values in the ignored application `.env` or the CI secret
-store. They must never appear in browser JavaScript, fixture manifests, logs,
-or Git history.
+The teammate key belongs only in the ignored local `apps/dimon_live/.env`.
+The GPU host keeps the same value in its ignored `.env.host`. Never place the
+key in Git, browser JavaScript, fixture manifests, logs, or model upstream requests.
 
 ## Shared limits and failures
 
@@ -137,8 +136,7 @@ Run the complete repository checks before sharing a branch:
 
 ```bash
 uv lock --check
-uv run python -m unittest discover -s apps/dimon_live/tests -p 'test_*.py'
-uv run python -m unittest discover -s tests -p 'test_*.py'
+DIMON_INFERENCE_MODE=fixture uv run pytest -q
 scripts/check-repository-boundary
 git diff --check
 ```

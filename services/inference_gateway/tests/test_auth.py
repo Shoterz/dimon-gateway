@@ -1,18 +1,13 @@
 from __future__ import annotations
 
 import asyncio
-import time
 import unittest
 
 import httpx
-from fastapi import Depends
+from fastapi import Request
 
 from services.inference_gateway.app import create_gateway_app
-from services.inference_gateway.auth import (
-    AccessIdentity,
-    AccessTokenVerifier,
-    require_access_identity,
-)
+from services.inference_gateway.auth import authenticate_service_key, require_service_key
 from services.inference_gateway.cli import main as gateway_main
 from services.inference_gateway.config import GatewayConfig
 from services.inference_gateway.errors import GatewayError
@@ -22,58 +17,133 @@ def valid_env() -> dict[str, str]:
     return {
         "DIMON_GATEWAY_HOST": "127.0.0.1",
         "DIMON_GATEWAY_PORT": "8891",
-        "DIMON_GATEWAY_TRUSTED_PROXIES": "127.0.0.1,::1",
-        "DIMON_CF_ACCESS_AUDIENCE": "audience-tag",
-        "DIMON_CF_ACCESS_ISSUER": "https://team.cloudflareaccess.com",
+        "DIMON_INFERENCE_SERVICE_KEY": "shared-test-key-0123456789abcdef",
         "DIMON_QWEN_API_BASE": "http://127.0.0.1:8080/v1",
         "DIMON_QWEN_REVISION": "test-revision",
         "DIMON_NEMOTRON_URL": "ws://127.0.0.1:8004/v1/realtime",
         "DIMON_NEMOTRON_REVISION": "test-nemotron-revision",
         "DIMON_KOKORO_URL": "http://127.0.0.1:3001",
         "DIMON_KOKORO_REVISION": "test-kokoro-revision",
+        "DIMON_GPU_OVERLORD_SOCKET": "/run/user/1000/gpu-overlord-1000.sock",
     }
 
 
-class StaticJwksClient:
-    def __init__(self, public_key):
-        self.public_key = public_key
-        self.calls = 0
-
-    def get_signing_key_from_jwt(self, token: str):
-        del token
-        self.calls += 1
-
-        class SigningKey:
-            key = self.public_key
-
-        return SigningKey()
-
-
 class GatewayConfigTests(unittest.TestCase):
-    def test_valid_config_is_loopback_and_derives_jwks_endpoint(self) -> None:
+    def test_valid_config_uses_loopback_and_shared_key(self) -> None:
         config = GatewayConfig.from_env(valid_env())
 
         self.assertEqual(config.bind_host, "127.0.0.1")
         self.assertEqual(config.bind_port, 8891)
+        self.assertEqual(config.service_key, "shared-test-key-0123456789abcdef")
         self.assertEqual(
-            config.jwks_url,
-            "https://team.cloudflareaccess.com/cdn-cgi/access/certs",
+            config.gpu_overlord_socket,
+            __import__("pathlib").Path("/run/user/1000/gpu-overlord-1000.sock"),
         )
-        self.assertEqual({str(value) for value in config.trusted_proxies}, {"127.0.0.1", "::1"})
+        self.assertEqual(
+            config.gpu_reset_units,
+            (
+                "dimon-faster-whisper-medium.service",
+                "jarvis-nemotron.service",
+                "gpu-overlord-stack.service",
+            ),
+        )
 
-    def test_required_identity_settings_cannot_be_missing(self) -> None:
+    def test_gpu_reset_units_are_explicit_and_validated(self) -> None:
+        env = valid_env()
+        env["DIMON_GPU_RESET_UNITS"] = "worker-a.service,worker-b.service"
+        self.assertEqual(
+            GatewayConfig.from_env(env).gpu_reset_units,
+            ("worker-a.service", "worker-b.service"),
+        )
+
+        for value in ("", "worker.service,worker.service", "../../worker.service"):
+            with self.subTest(value=value):
+                env["DIMON_GPU_RESET_UNITS"] = value
+                with self.assertRaisesRegex(ValueError, "DIMON_GPU_RESET_UNITS"):
+                    GatewayConfig.from_env(env)
+
+    def test_default_gateway_transcription_capacity_is_one(self) -> None:
+        app = create_gateway_app(GatewayConfig.from_env(valid_env()))
+
+        self.assertEqual(app.state.transcription_gateway.lease.capacity, 1)
+
+    def test_whisper_cpu_backend_drives_gateway_composition_and_public_revision(self) -> None:
+        env = valid_env()
+        env.update(
+            {
+                "DIMON_GATEWAY_STT_BACKEND": "whisper_cpu",
+                "DIMON_WHISPER_URL": "ws://127.0.0.1:8003/ws",
+                "DIMON_WHISPER_REVISION": "faster-whisper-small-en",
+            }
+        )
+
+        config = GatewayConfig.from_env(env)
+        app = create_gateway_app(config)
+
+        self.assertEqual(
+            type(app.state.transcription_gateway.recognizer).__name__,
+            "FasterWhisperPcm16Recognizer",
+        )
+        self.assertEqual(config.transcription_revision, "faster-whisper-small-en")
+
+    def test_dual_backend_uses_nemotron_primary_and_whisper_fallback(self) -> None:
+        env = valid_env()
+        env.update(
+            {
+                "DIMON_GATEWAY_STT_BACKEND": "dual",
+                "DIMON_WHISPER_URL": "ws://127.0.0.1:8003/ws",
+                "DIMON_WHISPER_REVISION": "faster-whisper-small-en",
+            }
+        )
+
+        config = GatewayConfig.from_env(env)
+        app = create_gateway_app(config)
+        recognizer = app.state.transcription_gateway.recognizer
+
+        self.assertEqual(type(recognizer).__name__, "DualTranscriptionRecognizer")
+        self.assertEqual(type(recognizer.fallback).__name__, "FasterWhisperPcm16Recognizer")
+        self.assertEqual(type(recognizer.primary).__name__, "NemotronPcm16Recognizer")
+        self.assertEqual(config.transcription_url, "ws://127.0.0.1:8003/ws")
+        self.assertEqual(config.transcription_revision, "faster-whisper-small-en")
+
+    def test_dual_backend_accepts_cuda_medium_as_authoritative_final(self) -> None:
+        env = valid_env()
+        env.update(
+            {
+                "DIMON_GATEWAY_STT_BACKEND": "dual",
+                "DIMON_WHISPER_URL": "ws://127.0.0.1:8007/ws",
+                "DIMON_WHISPER_REVISION": "faster-whisper-medium-cuda",
+            }
+        )
+
+        config = GatewayConfig.from_env(env)
+        app = create_gateway_app(config)
+        recognizer = app.state.transcription_gateway.recognizer
+
+        self.assertEqual(type(recognizer).__name__, "DualTranscriptionRecognizer")
+        self.assertEqual(config.transcription_url, "ws://127.0.0.1:8007/ws")
+        self.assertEqual(config.transcription_revision, "faster-whisper-medium-cuda")
+
+    def test_service_key_and_model_revisions_are_required(self) -> None:
         for key in (
-            "DIMON_GATEWAY_TRUSTED_PROXIES",
-            "DIMON_CF_ACCESS_AUDIENCE",
-            "DIMON_CF_ACCESS_ISSUER",
+            "DIMON_INFERENCE_SERVICE_KEY",
             "DIMON_QWEN_REVISION",
             "DIMON_NEMOTRON_REVISION",
+            "DIMON_KOKORO_REVISION",
+            "DIMON_GPU_OVERLORD_SOCKET",
         ):
             with self.subTest(key=key):
                 env = valid_env()
                 env[key] = ""
                 with self.assertRaisesRegex(ValueError, key):
                     GatewayConfig.from_env(env)
+
+    def test_gpu_overlord_socket_must_be_absolute(self) -> None:
+        env = valid_env()
+        env["DIMON_GPU_OVERLORD_SOCKET"] = "relative.sock"
+
+        with self.assertRaisesRegex(ValueError, "DIMON_GPU_OVERLORD_SOCKET"):
+            GatewayConfig.from_env(env)
 
     def test_bind_and_all_upstream_endpoints_must_be_loopback(self) -> None:
         cases = {
@@ -89,13 +159,13 @@ class GatewayConfigTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "loopback"):
                     GatewayConfig.from_env(env)
 
-    def test_invalid_port_and_issuer_are_rejected(self) -> None:
+    def test_invalid_port_and_key_header_values_are_rejected(self) -> None:
         for key, value in (
             ("DIMON_GATEWAY_PORT", "70000"),
-            ("DIMON_CF_ACCESS_ISSUER", "http://team.cloudflareaccess.com"),
-            ("DIMON_CF_ACCESS_ISSUER", "https://team.cloudflareaccess.com/path"),
+            ("DIMON_INFERENCE_SERVICE_KEY", "key with spaces"),
+            ("DIMON_INFERENCE_SERVICE_KEY", "too-short"),
         ):
-            with self.subTest(key=key, value=value):
+            with self.subTest(key=key):
                 env = valid_env()
                 env[key] = value
                 with self.assertRaises(ValueError):
@@ -115,155 +185,66 @@ class GatewayConfigTests(unittest.TestCase):
                         GatewayConfig.from_env(env)
 
 
-class AccessTokenVerifierTests(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls) -> None:
-        import jwt
-        from cryptography.hazmat.primitives.asymmetric import rsa
-
-        cls.jwt = jwt
-        cls.private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
-        cls.other_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
-        cls.config = GatewayConfig.from_env(valid_env())
-
-    def claims(self, **overrides):
-        now = int(time.time())
-        values = {
-            "type": "app",
-            "iss": self.config.access_issuer,
-            "aud": [self.config.access_audience],
-            "iat": now - 1,
-            "nbf": now - 1,
-            "exp": now + 60,
-            "sub": "user-123",
-            "email": "friend@example.com",
-        }
-        values.update(overrides)
-        return values
-
-    def token(self, claims=None, *, key=None) -> str:
-        return self.jwt.encode(
-            claims or self.claims(),
-            key or self.private_key,
-            algorithm="RS256",
-            headers={"kid": "test-key"},
+class ServiceKeyTests(unittest.TestCase):
+    def test_exact_bearer_key_is_accepted(self) -> None:
+        identity = authenticate_service_key(
+            "Bearer shared-test-key-0123456789abcdef",
+            "shared-test-key-0123456789abcdef",
         )
+        self.assertEqual(identity.subject, "shared-service-key")
 
-    def verifier(self) -> AccessTokenVerifier:
-        return AccessTokenVerifier(
-            self.config,
-            jwks_client=StaticJwksClient(self.private_key.public_key()),
-        )
+    def test_missing_or_incorrect_bearer_key_is_rejected(self) -> None:
+        for authorization in (None, "Basic shared-test-key", "Bearer wrong"):
+            with self.subTest(authorization=authorization):
+                with self.assertRaises(GatewayError) as raised:
+                    authenticate_service_key(
+                        authorization, "shared-test-key-0123456789abcdef"
+                    )
+                self.assertEqual(raised.exception.code, "UNAUTHORIZED")
+                self.assertEqual(raised.exception.status_code, 401)
 
-    def assert_unauthorized(self, token: str | None, peer: str = "127.0.0.1") -> None:
-        with self.assertRaises(GatewayError) as raised:
-            self.verifier().verify(token, peer)
-        self.assertEqual(raised.exception.status_code, 401)
-        self.assertEqual(raised.exception.code, "UNAUTHORIZED")
-
-    def test_missing_and_malformed_assertions_are_rejected(self) -> None:
-        self.assert_unauthorized(None)
-        self.assert_unauthorized("not-a-jwt")
-
-    def test_wrong_audience_issuer_expiry_and_signature_are_rejected(self) -> None:
-        cases = (
-            self.token(self.claims(aud=["other-audience"])),
-            self.token(self.claims(iss="https://other.cloudflareaccess.com")),
-            self.token(self.claims(exp=int(time.time()) - 1)),
-            self.token(key=self.other_key),
-        )
-        for token in cases:
-            with self.subTest(token=token[:24]):
-                self.assert_unauthorized(token)
-
-    def test_untrusted_immediate_peer_is_rejected_before_key_lookup(self) -> None:
-        jwks = StaticJwksClient(self.private_key.public_key())
-        verifier = AccessTokenVerifier(self.config, jwks_client=jwks)
-
-        with self.assertRaises(GatewayError) as raised:
-            verifier.verify(self.token(), "192.168.1.20")
-
-        self.assertEqual(raised.exception.code, "UNTRUSTED_PROXY")
-        self.assertEqual(raised.exception.status_code, 403)
-        self.assertEqual(jwks.calls, 0)
-
-    def test_verified_user_identity_uses_subject_and_email(self) -> None:
-        identity = self.verifier().verify(self.token(), "127.0.0.1")
-
-        self.assertEqual(
-            identity,
-            AccessIdentity("user-123", "user", "friend@example.com"),
-        )
-
-    def test_verified_service_identity_uses_common_name_when_sub_is_empty(self) -> None:
-        token = self.token(
-            self.claims(
-                sub="",
-                email=None,
-                common_name="service-client.access",
-            )
-        )
-
-        identity = self.verifier().verify(token, "::1")
-
-        self.assertEqual(
-            identity,
-            AccessIdentity("service-client.access", "service", None),
-        )
-
-    def test_missing_user_and_service_subject_is_rejected(self) -> None:
-        self.assert_unauthorized(self.token(self.claims(sub="", email=None)))
-
-    def request(self, app, path: str, *, client: tuple[str, int], headers=None):
-        async def send():
-            transport = httpx.ASGITransport(app=app, client=client)
-            async with httpx.AsyncClient(
-                transport=transport,
-                base_url="http://gateway.test",
-            ) as http:
-                return await http.get(path, headers=headers)
-
-        return asyncio.run(send())
-
-    def test_request_dependency_ignores_forwarded_identity_from_untrusted_peer(self) -> None:
-        app = create_gateway_app(self.config, verifier=self.verifier())
+    def test_request_dependency_uses_configured_service_key(self) -> None:
+        config = GatewayConfig.from_env(valid_env())
+        app = create_gateway_app(config)
 
         @app.get("/probe")
-        async def probe(identity: AccessIdentity = Depends(require_access_identity)):
-            return {"subject": identity.subject}
+        async def probe(request: Request):
+            return {"subject": await require_service_key(request)}
 
-        response = self.request(
-            app,
-            "/probe",
-            client=("192.168.1.20", 1234),
-            headers={
-                "cf-access-jwt-assertion": self.token(),
-                "x-forwarded-for": "127.0.0.1",
-            },
-        )
+        async def send():
+            transport = httpx.ASGITransport(app=app)
+            async with httpx.AsyncClient(
+                transport=transport, base_url="http://gateway.test"
+            ) as client:
+                return await client.get(
+                    "/probe",
+                    headers={
+                        "Authorization": "Bearer shared-test-key-0123456789abcdef"
+                    },
+                )
 
-        self.assertEqual(response.status_code, 403)
-        self.assertEqual(response.json()["error"]["code"], "UNTRUSTED_PROXY")
+        response = asyncio.run(send())
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {"subject": "shared-service-key"})
 
     def test_gateway_error_envelope_does_not_expose_exception_details(self) -> None:
-        app = create_gateway_app(self.config, verifier=self.verifier())
+        config = GatewayConfig.from_env(valid_env())
+        app = create_gateway_app(config)
 
         @app.get("/probe")
         async def probe():
             raise GatewayError("SAFE_CODE", "safe public message", 429, "request-123")
 
-        response = self.request(app, "/probe", client=("127.0.0.1", 1234))
+        async def send():
+            transport = httpx.ASGITransport(app=app)
+            async with httpx.AsyncClient(transport=transport, base_url="http://gateway.test") as client:
+                return await client.get("/probe")
 
+        response = asyncio.run(send())
         self.assertEqual(response.status_code, 429)
         self.assertEqual(
             response.json(),
-            {
-                "error": {
-                    "code": "SAFE_CODE",
-                    "message": "safe public message",
-                    "request_id": "request-123",
-                }
-            },
+            {"error": {"code": "SAFE_CODE", "message": "safe public message", "request_id": "request-123"}},
         )
 
 

@@ -1,0 +1,20 @@
+[Unit]
+Description=Dimon project-local Faster-Whisper Medium CUDA worker
+After=gpu-overlord-stack.service network.target
+StartLimitIntervalSec=60
+StartLimitBurst=3
+
+[Service]
+Type=simple
+WorkingDirectory=@REPO_ROOT@
+EnvironmentFile=@ENV_FILE@
+Environment=DIMON_PROJECT_PYTHON=@REPO_ROOT@/.venv/bin/python
+ExecStart=@REPO_ROOT@/services/faster_whisper_cuda/run.sh
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+UMask=0077
+NoNewPrivileges=true
+
+[Install]
+WantedBy=default.target

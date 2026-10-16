@@ -14,7 +14,8 @@ class RepositoryDocumentationTests(unittest.TestCase):
 
         self.assertIn("Python 3.12", readme)
         self.assertIn("uv sync --locked --group dev", readme)
-        self.assertIn("uv run dimon-dev", readme)
+        self.assertIn("uv run dimon-serve", readme)
+        self.assertRegex(readme, r"local\s+environment file")
         self.assertIn("fixture", readme.lower())
         self.assertIn("without model downloads", readme)
         self.assertIn("Send John Smith S$50 from savings.", readme)
@@ -36,7 +37,7 @@ class RepositoryDocumentationTests(unittest.TestCase):
         for mode in ("fixture", "remote", "local"):
             self.assertIn(mode, example)
         self.assertIn("DIMON_INFERENCE_GATEWAY_URL", example)
-        self.assertIn("DIMON_CF_ACCESS_CLIENT_SECRET=", example)
+        self.assertIn("DIMON_INFERENCE_SERVICE_KEY=", example)
         self.assertNotRegex(example, r"/home/[A-Za-z0-9._-]+/")
         self.assertNotRegex(example, r"cfast_[A-Za-z0-9]{20,}")
 
@@ -60,7 +61,7 @@ class RepositoryDocumentationTests(unittest.TestCase):
         )
 
         self.assertIn("../../.env.example", local_example)
-        self.assertIn("cp .env.example apps/dimon_live/.env", local_example)
+        self.assertIn("copy this file to apps/dimon_live/.env", local_example)
 
 
 if __name__ == "__main__":

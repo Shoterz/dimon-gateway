@@ -1,6 +1,6 @@
 # Model provenance
 
-Dimon stores model weights outside Git and refers to each artifact through an environment variable. `config/models.example.yaml` records the upstream source, immutable revision, license identifier, exact byte size, SHA-256 digest, and loopback port. Copy it to the ignored `config/models.yaml` for a GPU host; do not replace revisions with branch names.
+Dimon stores model weights outside Git and refers to each artifact through an environment variable. `config/models.example.yaml` records the upstream source, immutable revision, license identifier, exact byte size, SHA-256 digest, and loopback port for the GPU host's single-file artifacts. Copy it to the ignored `config/models.yaml` for a GPU host; do not replace revisions with branch names.
 
 | Capability | Upstream artifact | Revision | License | Bytes | SHA-256 | Local path variable |
 | --- | --- | --- | --- | ---: | --- | --- |
@@ -9,6 +9,13 @@ Dimon stores model weights outside Git and refers to each artifact through an en
 | Speech synthesis | `kokoro-v1_0.pth` | `f3ff3571791e39611d31c381e3a41a3af07b4987` | Apache-2.0 | 327,212,226 | `496dba118d1a58f5f3db2efc88dbdc216e0483fc89fe6e47ee1f2c53f18ad1e4` | `DIMON_KOKORO_MODEL_PATH` |
 
 The repository does not redistribute these artifacts. The host operator obtains them from the recorded upstream, accepts the applicable license, and stores one copy anywhere outside the repository. Shared and standalone modes use the same path variables, so changing modes does not duplicate weights.
+
+Faster-Whisper Medium is a multi-file snapshot rather than one artifact. Its
+immutable upstream revision is recorded in
+`services/faster_whisper_cuda/artifacts.json`, and its Python/CUDA dependency
+graph is hash-locked in `services/faster_whisper_cuda/requirements.lock`.
+Windows face, voiceprint, Qwen, whisper.cpp, and Kokoro downloads are pinned by
+URL, byte size, and SHA-256 in `scripts/windows/artifacts.psd1`.
 
 Verify a configured host with:
 

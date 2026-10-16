@@ -1,0 +1,74 @@
+{
+  "captured_at": "2026-10-15T11:55:36+08:00",
+  "result": "READY",
+  "preparation": {
+    "started_at": "2026-10-15T03:54:10.451401+00:00",
+    "completed_at": "2026-10-15T03:54:13.903343+00:00",
+    "hot_revalidation_seconds": 3.452,
+    "retention_check_seconds_after_ready": 82,
+    "ready_until": "2026-10-15T03:59:13.903353+00:00"
+  },
+  "gpu": {
+    "total_mb": 12282,
+    "used_mb": 9605,
+    "free_mb": 2261,
+    "safety_reserve_mb": 512
+  },
+  "workers": [
+    {
+      "name": "qwen",
+      "profile": "qwen35-9b-abliterated-q5-4k",
+      "worker_pid": 2165100,
+      "state": "ready",
+      "active_jobs": 0,
+      "observed_vram_mb": 5852,
+      "budget_mb": 6528,
+      "model": "qwen35-9b-abliterated-q5",
+      "device": "cuda",
+      "compute_type": "Q5_K_M",
+      "context_tokens": 4096
+    },
+    {
+      "name": "nemotron",
+      "profile": "nemotron-en",
+      "worker_pid": 2404420,
+      "state": "ready",
+      "active_jobs": 0,
+      "observed_vram_mb": 1184,
+      "budget_mb": 1536
+    },
+    {
+      "name": "kokoro",
+      "profile": "kokoro-82m",
+      "worker_pid": 2167809,
+      "state": "ready",
+      "active_jobs": 0,
+      "observed_vram_mb": 860,
+      "budget_mb": 1280
+    },
+    {
+      "name": "faster_whisper",
+      "profile": "faster-whisper-medium-cuda",
+      "worker_pid": 2202223,
+      "state": "ready",
+      "active_jobs": 0,
+      "observed_vram_mb": 1132,
+      "budget_mb": 1664,
+      "model": "medium",
+      "device": "cuda",
+      "compute_type": "int8_float16"
+    }
+  ],
+  "nemotron_lifecycle": {
+    "state": "ready",
+    "capacity": 1,
+    "active_sessions": 0,
+    "oldest_lease_age_seconds": 0.0
+  },
+  "cold_start_observation": {
+    "initial_state": "DEGRADED",
+    "reason_code": "WORKER_MISSING",
+    "cause": "concurrent startup reservation race",
+    "automatic_monitor_recovered": true
+  }
+}

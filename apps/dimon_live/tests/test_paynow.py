@@ -7,6 +7,7 @@ from apps.dimon_live.database import Database
 from apps.dimon_live.paynow import (
     PayNowLookupError,
     SyntheticPayNowDirectory,
+    derive_mobile_proxy_from_text,
     normalize_mobile_proxy,
 )
 
@@ -16,6 +17,18 @@ REQUEST_ID = "00000000-0000-4000-8000-000000000080"
 
 
 class PayNowTests(unittest.TestCase):
+    def test_spoken_digit_sequence_is_a_paynow_mobile_proxy(self):
+        text = (
+            "pay my friend through his Pay Now ten dollars "
+            "eight seven six five four three two one"
+        )
+
+        proxy, evidence = derive_mobile_proxy_from_text(text)
+
+        self.assertEqual(proxy, "87654321")
+        self.assertEqual(evidence, "eight seven six five four three two one")
+        self.assertEqual(normalize_mobile_proxy(evidence), "87654321")
+
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
         self.database = Database(

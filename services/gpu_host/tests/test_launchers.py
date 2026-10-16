@@ -16,7 +16,12 @@ class LauncherContractTests(unittest.TestCase):
         return path, path.read_text(encoding="utf-8")
 
     def test_every_launcher_is_strict_loopback_fixed_and_execs(self) -> None:
-        expected = {"qwen": "8080", "nemotron": "8004", "kokoro": "3001"}
+        expected = {
+            "qwen": "8080",
+            "nemotron": "8004",
+            "kokoro": "3001",
+            "faster_whisper_cuda": "8007",
+        }
         for service, port in expected.items():
             path, body = self.launcher(service)
             with self.subTest(service=service):
@@ -35,6 +40,11 @@ class LauncherContractTests(unittest.TestCase):
             "qwen": ("DIMON_QWEN_MODEL_PATH", "DIMON_LLAMA_SERVER_PATH", "--ctx-size"),
             "nemotron": ("DIMON_NEMOTRON_MODEL_PATH", "DIMON_NEMO_SPEECH_PATH", "nemotron-en"),
             "kokoro": ("DIMON_KOKORO_MODEL_PATH", "DIMON_KOKORO_CONFIG_PATH", "DIMON_KOKORO_VOICE_PATH"),
+            "faster_whisper_cuda": (
+                "DIMON_FASTER_WHISPER_PYTHON",
+                "DIMON_FASTER_WHISPER_MODEL_PATH",
+                "DIMON_GPU_OVERLORD_CLIENT_DIR",
+            ),
         }
         for service, tokens in expectations.items():
             _, body = self.launcher(service)
@@ -88,7 +98,7 @@ class LauncherContractTests(unittest.TestCase):
                     self.assertNotIn(temp, result.stdout)
 
     def test_unknown_arguments_are_rejected(self) -> None:
-        for service in ("qwen", "nemotron", "kokoro"):
+        for service in ("qwen", "nemotron", "kokoro", "faster_whisper_cuda"):
             result = subprocess.run(
                 [str(ROOT / "services" / service / "run.sh"), "--shell-fragment"],
                 cwd=ROOT,
@@ -98,6 +108,78 @@ class LauncherContractTests(unittest.TestCase):
             )
             with self.subTest(service=service):
                 self.assertEqual(result.returncode, 2)
+
+    def test_cuda_medium_check_requires_repository_owned_runtime_and_model(self) -> None:
+        runtime_root = ROOT / ".runtime"
+        runtime_root.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=runtime_root) as temp, tempfile.TemporaryDirectory() as external:
+            owned = Path(temp)
+            python = owned / "venv/bin/python"
+            model = owned / "model"
+            client = Path(external)
+            python.parent.mkdir(parents=True)
+            python.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            python.chmod(0o755)
+            model.mkdir()
+            (model / "model.bin").write_bytes(b"model")
+            (model / ".dimon-artifact.json").write_text("{}", encoding="utf-8")
+            (client / "gpu_overlord_client.py").write_text("", encoding="utf-8")
+            environment = os.environ.copy()
+            environment.update(
+                {
+                    "DIMON_PROJECT_PYTHON": str(python),
+                    "DIMON_FASTER_WHISPER_PYTHON": str(python),
+                    "DIMON_FASTER_WHISPER_MODEL_PATH": str(model),
+                    "DIMON_GPU_OVERLORD_CLIENT_DIR": str(client),
+                }
+            )
+
+            result = subprocess.run(
+                [str(ROOT / "services/faster_whisper_cuda/run.sh"), "--check"],
+                cwd=ROOT,
+                env=environment,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "faster_whisper_cuda: READY")
+
+    def test_cuda_medium_check_allows_standard_venv_interpreter_symlink(self) -> None:
+        runtime_root = ROOT / ".runtime"
+        runtime_root.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=runtime_root) as temp, tempfile.TemporaryDirectory() as external:
+            owned = Path(temp)
+            python = owned / "venv/bin/python"
+            model = owned / "model"
+            client = Path(external)
+            python.parent.mkdir(parents=True)
+            python.symlink_to("/usr/bin/python3")
+            model.mkdir()
+            (model / "model.bin").write_bytes(b"model")
+            (model / ".dimon-artifact.json").write_text("{}", encoding="utf-8")
+            (client / "gpu_overlord_client.py").write_text("", encoding="utf-8")
+            environment = os.environ.copy()
+            environment.update(
+                {
+                    "DIMON_PROJECT_PYTHON": str(ROOT / ".venv/bin/python"),
+                    "DIMON_FASTER_WHISPER_PYTHON": str(python),
+                    "DIMON_FASTER_WHISPER_MODEL_PATH": str(model),
+                    "DIMON_GPU_OVERLORD_CLIENT_DIR": str(client),
+                }
+            )
+
+            result = subprocess.run(
+                [str(ROOT / "services/faster_whisper_cuda/run.sh"), "--check"],
+                cwd=ROOT,
+                env=environment,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
 
 
 if __name__ == "__main__":

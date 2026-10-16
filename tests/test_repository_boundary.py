@@ -17,7 +17,7 @@ class PathViolationTests(unittest.TestCase):
     def test_rejects_private_or_generated_paths(self) -> None:
         rejected = {
             ".env": "active environment file",
-            "apps/dimon_live/.env": "active environment file",
+            "other/app/.env": "active environment file",
             "apps/dimon_live/data/demo.sqlite3": "database",
             "runtime/ledgers/visitor.sqlite3": "runtime data",
             "models/qwen.gguf": "model artifact",
@@ -29,6 +29,7 @@ class PathViolationTests(unittest.TestCase):
             "deploy/cloudflare/cert.pem": "Cloudflare credential",
             "deploy/cloudflare/abc123.json": "Cloudflare credential",
             "docs/competition handbook/tencent hackathon brief.pdf": "competition PDF",
+            "apps/dimon_live/.env": "active environment file",
         }
 
         for path, expected_reason in rejected.items():
@@ -46,6 +47,8 @@ class PathViolationTests(unittest.TestCase):
             "fixtures/inference/manifest.json",
             "deploy/cloudflare/access-policy.example.json",
             "apps/dimon_live/app.py",
+            "apps/dimon_live/static/audio/wake-greeting-v1.wav",
+            "apps/dimon_live/static/audio/voice-enrollment-confirmation-v1.wav",
         ):
             with self.subTest(path=path):
                 self.assertEqual(path_violations(Path(path)), [])
@@ -58,6 +61,8 @@ class ContentViolationTests(unittest.TestCase):
             "CF_ACCESS_CLIENT_SECRET=" + "cf" + "ast_abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMN12345678": "credential",
             "api_key=" + "s" + "k-abcdefghijklmnopqrstuvwxyz012345": "credential",
             "CF_ACCESS_CLIENT_SECRET=" + "1" * 64: "credential",
+            "DIMON_INFERENCE_" + "SERVICE_KEY=" + "x" * 32: "credential",
+            "DIMON_INFERENCE_" + "SERVICE_KEY=" + "james" + "bond007": "credential",
             "-----BEGIN " + "PRIVATE KEY-----": "private key",
         }
 
@@ -131,6 +136,62 @@ class ScriptContractTests(unittest.TestCase):
         self.assertNotEqual(completed.returncode, 0)
         self.assertIn("leaked.env", completed.stdout)
         self.assertNotIn("cfast_", completed.stdout)
+
+    def test_history_mode_rejects_a_removed_secret_file(self) -> None:
+        script = Path(__file__).parents[1] / "scripts" / "check-repository-boundary"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            subprocess.run(["git", "init", "-q", str(root)], check=True)
+            subprocess.run(
+                ["git", "-C", str(root), "config", "user.name", "Boundary Test"],
+                check=True,
+            )
+            subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(root),
+                    "config",
+                    "user.email",
+                    "boundary@example.invalid",
+                ],
+                check=True,
+            )
+            leaked = root / "service.env"
+            leaked.write_text(
+                "DIMON_INFERENCE_" + "SERVICE_KEY=" + "x" * 32 + "\n",
+                encoding="utf-8",
+            )
+            subprocess.run(["git", "-C", str(root), "add", "service.env"], check=True)
+            subprocess.run(
+                ["git", "-C", str(root), "commit", "-qm", "temporary leak"],
+                check=True,
+            )
+            leaked.unlink()
+            (root / "README.md").write_text("safe\n", encoding="utf-8")
+            subprocess.run(["git", "-C", str(root), "add", "-A"], check=True)
+            subprocess.run(
+                ["git", "-C", str(root), "commit", "-qm", "remove leak"],
+                check=True,
+            )
+
+            current = subprocess.run(
+                [sys.executable, str(script), "--root", str(root), "--committed"],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            history = subprocess.run(
+                [sys.executable, str(script), "--root", str(root), "--history"],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+
+        self.assertEqual(current.returncode, 0, current.stdout)
+        self.assertNotEqual(history.returncode, 0)
+        self.assertIn("service.env", history.stdout)
+        self.assertNotIn("x" * 32, history.stdout)
 
 
 if __name__ == "__main__":

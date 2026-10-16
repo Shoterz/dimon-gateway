@@ -1,0 +1,9 @@
+{
+  "contract_version": 1,
+  "kind": "MULTI_ACTION",
+  "items": [
+    {"kind": "BILL_PAYMENT", "evidence": "pay my PUB Water bill S$32.80"},
+    {"kind": "BENEFICIARY_TRANSFER", "evidence": "send Alicia forty five dollars for dining"},
+    {"kind": "STOCK_INVESTMENT", "evidence": "buy two shares of NVIDIA at market using my investment account"}
+  ]
+}

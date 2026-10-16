@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -33,6 +34,7 @@ class CleanCloneTests(unittest.TestCase):
             )
             completed = subprocess.run(
                 [
+                    sys.executable,
                     str(ROOT / "scripts/check-repository-boundary"),
                     "--root",
                     str(clone),
@@ -47,6 +49,7 @@ class CleanCloneTests(unittest.TestCase):
         self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
         self.assertIn("committed file(s)", completed.stdout)
         self.assertNotIn("apps/dimon_live/.env", tracked)
+        self.assertIn("apps/dimon_live/.env.example", tracked)
         self.assertNotIn("apps/dimon_live/data/demo.sqlite3", tracked)
         self.assertFalse(any(path.startswith("runtime/") for path in tracked))
         self.assertFalse(any(path.endswith(".pdf") for path in tracked))

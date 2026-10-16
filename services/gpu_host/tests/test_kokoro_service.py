@@ -5,6 +5,7 @@ import unittest
 
 import httpx
 
+from services.kokoro import server as kokoro_server
 from services.kokoro.server import create_app
 
 
@@ -24,6 +25,9 @@ class FakeEngine:
 
 
 class KokoroServiceTests(unittest.TestCase):
+    def test_all_speech_uses_the_single_authoritative_speed(self) -> None:
+        self.assertEqual(getattr(kokoro_server, "KOKORO_SPEED", None), 1.20)
+
     async def request(self, app, method: str, path: str, **kwargs):
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=app), base_url="http://kokoro.test"

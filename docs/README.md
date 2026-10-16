@@ -16,6 +16,9 @@ speaks committed results. The models receive no approval or ledger authority.
   genuine contributions and submission evidence
 - [Next-work queue](next-work.md) — ordered remaining work and completion
   evidence
+- [Winning DCTA implementation roadmap](features/winning-dcta-implementation-roadmap.md)
+  — living one-item-at-a-time tracker for the hero flow, speech experience,
+  shared architecture, and personal wealth hub
 - [Runtime and service catalog](runtime-service-catalog.md) — living inventory
   of application modules, host inference dependencies, deployment boundaries,
   and planned components

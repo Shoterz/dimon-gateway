@@ -1,6 +1,7 @@
 import dataclasses
 import json
 import sqlite3
+from contextlib import closing
 import tempfile
 import unittest
 from concurrent.futures import ThreadPoolExecutor
@@ -15,11 +16,12 @@ from apps.dimon_live.database import (
     IdempotencyConflict,
     InsufficientFunds,
     ReceiptRejected,
+    ResolutionError,
     SCHEMA,
-    TransferCommand,
 )
 from apps.dimon_live.batch_receipts import BatchReceiptDraft, BatchReceiptItemDraft
 from apps.dimon_live.receipts import ReceiptDraft, build_receipt_record
+from apps.dimon_live.tests.device_signer import SoftwareAuthenticator
 
 
 FIXED_NOW = datetime(2026, 9, 23, 3, 0, tzinfo=timezone.utc)
@@ -43,8 +45,10 @@ class DatabaseSeedTests(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
         self.db_path = Path(self.temp_dir.name) / "demo.sqlite3"
-        self.database = Database(self.db_path)
+        self.database = Database(self.db_path, single_account=True)
         self.database.initialize()
+        self.device = SoftwareAuthenticator()
+        self.device.enroll(self.database)
 
     def tearDown(self):
         self.temp_dir.cleanup()
@@ -92,6 +96,25 @@ class DatabaseSeedTests(unittest.TestCase):
                     "Alicia Powell",
                     "$4",
                 ),
+            ),
+        )
+
+    def utility_bill_draft(self, amount_minor=12_000):
+        return ReceiptDraft(
+            request_id="00000000-0000-4000-8000-000000000042",
+            original_text="Pay my Singapore Power bill $120 from savings.",
+            user_id="demo_user_01",
+            source_account_id="acct_savings_01",
+            beneficiary_id="biller_sp_services",
+            recipient_display_name="SP Services",
+            amount_minor=amount_minor,
+            currency="SGD",
+            destination_kind="UTILITY_BILL",
+            destination_reference="biller_sp_services",
+            destination_account_id="acct_biller_sp_services",
+            evidence_bundle=(
+                {"turn": 1, "text": "Pay my Singapore Power bill $120 from savings."},
+                {"kind": "UTILITY_BILL_PAYMENT", "biller_evidence": "Singapore Power", "amount_evidence": "$120"},
             ),
         )
 
@@ -146,7 +169,7 @@ class DatabaseSeedTests(unittest.TestCase):
         )
 
     def count_rows(self, table):
-        with sqlite3.connect(self.db_path) as connection:
+        with closing(sqlite3.connect(self.db_path)) as connection, connection:
             return connection.execute(
                 f"SELECT COUNT(*) FROM {table}"
             ).fetchone()[0]
@@ -227,14 +250,21 @@ class DatabaseSeedTests(unittest.TestCase):
         )
         self.assertEqual(self.database.get_state()["transactions"], [])
         receipt = pending["batch_receipt"]
+        assertion = self.sign_batch(receipt)
         executed = self.database.approve_batch_receipt(
             receipt["receipt_id"],
             receipt["receipt_digest"],
+            assertion=assertion,
+            context=self.device.context,
+            voice_confirmation="yes, confirm",
             now=FIXED_NOW + timedelta(minutes=1),
         )
         replay = self.database.approve_batch_receipt(
             receipt["receipt_id"],
             receipt["receipt_digest"],
+            assertion=assertion,
+            context=self.device.context,
+            voice_confirmation="yes, confirm",
             now=FIXED_NOW + timedelta(minutes=2),
         )
         after = {
@@ -252,10 +282,10 @@ class DatabaseSeedTests(unittest.TestCase):
         self.assertTrue(all("transaction_id" in row for row in transactions))
 
     def test_initialize_adds_batch_tables_without_deleting_single_history(self):
-        self.database.execute_policy_transfer(self.command(amount_minor=500), now=FIXED_NOW)
+        self.approve(self.create_pending_alicia()["receipt_choices"][0])
         self.database.initialize()
         self.assertEqual(self.count_rows("ledger_transactions"), 1)
-        with sqlite3.connect(self.db_path) as connection:
+        with closing(sqlite3.connect(self.db_path)) as connection, connection:
             tables = {
                 row[0]
                 for row in connection.execute(
@@ -283,6 +313,7 @@ class DatabaseSeedTests(unittest.TestCase):
         )
         for expression, reason in cases:
             with self.subTest(expression=expression):
+                self.database.reset()
                 pending = self.database.create_pending_batch_receipt(
                     self.batch_draft(),
                     raw_model_output="{}",
@@ -290,8 +321,10 @@ class DatabaseSeedTests(unittest.TestCase):
                     now=FIXED_NOW,
                 )
                 receipt = pending["batch_receipt"]
+                # The user signs the genuine receipt; tampering happens after.
+                assertion = self.sign_batch(receipt)
                 before = self.database.get_state()
-                with sqlite3.connect(self.db_path) as connection:
+                with closing(sqlite3.connect(self.db_path)) as connection, connection:
                     connection.execute(
                         f"UPDATE batch_review_receipts SET {expression} WHERE receipt_id = ?",
                         (receipt["receipt_id"],),
@@ -300,6 +333,9 @@ class DatabaseSeedTests(unittest.TestCase):
                     self.database.approve_batch_receipt(
                         receipt["receipt_id"],
                         receipt["receipt_digest"],
+                        assertion=assertion,
+                        context=self.device.context,
+                        voice_confirmation="yes, confirm",
                         now=FIXED_NOW + timedelta(minutes=1),
                     )
                 after = self.database.get_state()
@@ -314,14 +350,20 @@ class DatabaseSeedTests(unittest.TestCase):
             now=FIXED_NOW,
         )
         receipt = pending["batch_receipt"]
-        with sqlite3.connect(self.db_path) as connection:
+        assertion = self.sign_batch(receipt)
+        with closing(sqlite3.connect(self.db_path)) as connection, connection:
             connection.execute(
                 "UPDATE beneficiaries SET destination_account_id = ? WHERE beneficiary_id = ?",
                 ("acct_john_tan_01", "beneficiary_john_smith_01"),
             )
         with self.assertRaisesRegex(ReceiptRejected, "BATCH_RECEIPT_TAMPERED"):
             self.database.approve_batch_receipt(
-                receipt["receipt_id"], receipt["receipt_digest"], now=FIXED_NOW
+                receipt["receipt_id"],
+                receipt["receipt_digest"],
+                assertion=assertion,
+                context=self.device.context,
+                voice_confirmation="yes, confirm",
+                now=FIXED_NOW,
             )
         self.assertEqual(self.count_rows("batch_ledger_transactions"), 0)
         self.assertEqual(self.count_rows("batch_ledger_entries"), 0)
@@ -334,13 +376,19 @@ class DatabaseSeedTests(unittest.TestCase):
             now=FIXED_NOW,
         )
         receipt = pending["batch_receipt"]
-        with sqlite3.connect(self.db_path) as connection:
+        assertion = self.sign_batch(receipt)
+        with closing(sqlite3.connect(self.db_path)) as connection, connection:
             connection.execute(
                 "UPDATE accounts SET balance_minor = 500 WHERE account_id = 'acct_savings_01'"
             )
         with self.assertRaisesRegex(InsufficientFunds, "INSUFFICIENT_FUNDS"):
             self.database.approve_batch_receipt(
-                receipt["receipt_id"], receipt["receipt_digest"], now=FIXED_NOW
+                receipt["receipt_id"],
+                receipt["receipt_digest"],
+                assertion=assertion,
+                context=self.device.context,
+                voice_confirmation="yes, confirm",
+                now=FIXED_NOW,
             )
         self.assertEqual(self.count_rows("batch_ledger_transactions"), 0)
         self.assertEqual(self.count_rows("batch_ledger_entries"), 0)
@@ -353,6 +401,7 @@ class DatabaseSeedTests(unittest.TestCase):
             now=FIXED_NOW,
         )
         receipt = pending["batch_receipt"]
+        assertion = self.sign_batch(receipt)
         barrier = Barrier(2)
 
         def approve():
@@ -362,7 +411,11 @@ class DatabaseSeedTests(unittest.TestCase):
             )
             barrier.wait()
             return contender.approve_batch_receipt(
-                receipt["receipt_id"], receipt["receipt_digest"]
+                receipt["receipt_id"],
+                receipt["receipt_digest"],
+                assertion=assertion,
+                context=self.device.context,
+                voice_confirmation="yes, confirm",
             )
 
         with ThreadPoolExecutor(max_workers=2) as pool:
@@ -532,7 +585,7 @@ class DatabaseSeedTests(unittest.TestCase):
 
         legacy.initialize()
 
-        with sqlite3.connect(legacy_path) as connection:
+        with closing(sqlite3.connect(legacy_path)) as connection, connection:
             beneficiary_columns = {
                 row[1] for row in connection.execute("PRAGMA table_info(beneficiaries)")
             }
@@ -560,29 +613,28 @@ class DatabaseSeedTests(unittest.TestCase):
                 tables
             )
         )
+        self.device.enroll(legacy)
+        challenge = legacy.issue_approval_challenge(
+            "single",
+            "receipt_legacy",
+            record["receipt_digest"],
+            rp_id=self.device.rp_id,
+            now=FIXED_NOW,
+        )
         response = legacy.approve_receipt(
             "receipt_legacy",
             record["receipt_digest"],
             "demo_user_01",
+            assertion=self.device.sign(challenge),
+            context=self.device.context,
+            voice_confirmation="yes, confirm",
             now=FIXED_NOW + timedelta(minutes=1),
         )
         self.assertEqual(response["outcome"], "EXECUTED_SYNTHETIC_TRANSFER")
 
     def scalar(self, sql):
-        with sqlite3.connect(self.db_path) as connection:
+        with closing(sqlite3.connect(self.db_path)) as connection, connection:
             return connection.execute(sql).fetchone()[0]
-
-    def command(self, *, amount_minor=5000):
-        return TransferCommand(
-            request_id="00000000-0000-4000-8000-000000000001",
-            original_text="Send John Smith S$50 from savings.",
-            source_account_id="acct_savings_01",
-            beneficiary_id="beneficiary_john_smith_01",
-            amount_minor=amount_minor,
-            currency="SGD",
-            raw_model_output="{}",
-            validated_intent={},
-        )
 
     def blocked_attempt(self):
         response = {
@@ -611,6 +663,85 @@ class DatabaseSeedTests(unittest.TestCase):
         self.assertEqual(choice["receipt_digest"], stored["receipt_digest"])
         self.assertEqual(choice["source_label"], "savings")
         self.assertEqual(self.database.get_state()["transactions"], [])
+
+    def test_utility_bill_receipt_uses_auth_tier_and_posts_balanced_payment_once(self):
+        before = {row["account_id"]: row["balance_minor"] for row in self.database.get_state()["accounts"]}
+        draft = self.utility_bill_draft()
+        pending = self.database.create_pending_receipts(
+            (draft,),
+            raw_model_output="{}",
+            validated_intent={"kind": "UTILITY_BILL_PAYMENT"},
+            reason_code="BILL_PAYMENT_CONFIRMATION_REQUIRED",
+            response_base={"outcome": "CLARIFICATION_REQUEST", "question": "Review bill", "trace": []},
+            now=FIXED_NOW,
+        )
+        choice = pending["receipt_choices"][0]
+        policy = self.database.policy_for_receipt("single", choice["receipt_id"])
+        self.assertFalse(policy["requires_singpass"])
+        self.assertTrue(policy["requires_voice_confirmation"])
+        self.assertEqual(self.count_rows("ledger_transactions"), 0)
+
+        challenge = self.database.issue_approval_challenge(
+            "single", choice["receipt_id"], choice["receipt_digest"],
+            rp_id=self.device.rp_id, now=FIXED_NOW,
+        )
+        execution = self.database.approve_receipt(
+            choice["receipt_id"], choice["receipt_digest"], "demo_user_01",
+            assertion=self.device.sign(challenge), context=self.device.context,
+            voice_confirmation="yes, confirm", now=FIXED_NOW + timedelta(minutes=1),
+        )
+
+        self.assertEqual(execution["outcome"], "EXECUTED_SYNTHETIC_BILL_PAYMENT")
+        self.assertEqual(execution["resolved_action"]["balance_before_minor"], 200_000)
+        self.assertEqual(execution["resolved_action"]["balance_after_minor"], 188_000)
+        self.assertEqual(self.database.get_receipt(choice["receipt_id"])["status"], "EXECUTED")
+        state = self.database.get_state()
+        self.assertEqual(len(state["transactions"]), 1)
+        self.assertEqual(state["transactions"][0]["kind"], "UTILITY_BILL_PAYMENT")
+        self.assertEqual(state["transactions"][0]["biller_display_name"], "SP Services")
+        after = {row["account_id"]: row["balance_minor"] for row in state["accounts"]}
+        self.assertEqual(after["acct_savings_01"], before["acct_savings_01"] - 12_000)
+        self.assertEqual(after["acct_biller_sp_services"], before["acct_biller_sp_services"] + 12_000)
+
+    def test_utility_bill_at_two_hundred_uses_singpass_face_tier(self):
+        draft = dataclasses.replace(
+            self.utility_bill_draft(),
+            request_id="00000000-0000-4000-8000-000000000043",
+            original_text="Pay my Singapore Power bill $200 from savings.",
+            amount_minor=20_000,
+            evidence_bundle=(
+                {"turn": 1, "text": "Pay my Singapore Power bill $200 from savings."},
+                {"kind": "UTILITY_BILL_PAYMENT", "biller_evidence": "Singapore Power", "amount_evidence": "$200"},
+            ),
+        )
+        pending = self.database.create_pending_receipts(
+            (draft,), raw_model_output="{}", validated_intent={"kind": "UTILITY_BILL_PAYMENT"},
+            reason_code="BILL_PAYMENT_CONFIRMATION_REQUIRED",
+            response_base={"outcome": "CLARIFICATION_REQUEST", "trace": []}, now=FIXED_NOW,
+        )
+        policy = self.database.policy_for_receipt("single", pending["receipt_choices"][0]["receipt_id"])
+        self.assertTrue(policy["requires_singpass"])
+        self.assertTrue(policy["requires_face"])
+        self.assertFalse(policy["requires_voice_confirmation"])
+        challenge = self.database.issue_approval_challenge(
+            "single", pending["receipt_choices"][0]["receipt_id"],
+            pending["receipt_choices"][0]["receipt_digest"],
+            rp_id=self.device.rp_id, now=FIXED_NOW,
+        )
+        self.assertTrue(challenge["review"]["requires_read_back"])
+        self.assertEqual(
+            challenge["review"]["read_back"]["text"],
+            "Pay S$200.00 to SP Services from savings.",
+        )
+
+    def test_utility_bill_receipt_rejects_unbound_destination_account(self):
+        draft = dataclasses.replace(self.utility_bill_draft(), destination_account_id="acct_alicia_powell_01")
+        with self.assertRaisesRegex(ResolutionError, "server-owned biller resolution failed"):
+            self.database.create_pending_receipts(
+                (draft,), raw_model_output="{}", validated_intent={},
+                reason_code="BILL_PAYMENT_CONFIRMATION_REQUIRED",
+                response_base={"outcome": "CLARIFICATION_REQUEST", "trace": []}, now=FIXED_NOW,
+            )
 
     def test_ambiguous_candidates_share_group_but_have_distinct_receipts(self):
         choices = self.create_pending_johns()["receipt_choices"]
@@ -666,30 +797,75 @@ class DatabaseSeedTests(unittest.TestCase):
             with self.subTest(table=table):
                 self.assertEqual(self.count_rows(table), 0)
 
-    def approve(self, choice, *, now=FIXED_NOW, user_id="demo_user_01"):
+    def sign(self, choice, *, now=FIXED_NOW):
+        challenge = self.database.issue_approval_challenge(
+            "single",
+            choice["receipt_id"],
+            choice["receipt_digest"],
+            rp_id=self.device.rp_id,
+            now=now,
+        )
+        return self.device.sign(challenge)
+
+    def sign_batch(self, receipt, *, now=FIXED_NOW):
+        challenge = self.database.issue_approval_challenge(
+            "batch",
+            receipt["receipt_id"],
+            receipt["receipt_digest"],
+            rp_id=self.device.rp_id,
+            now=now,
+        )
+        return self.device.sign(challenge)
+
+    def approve(self, choice, *, now=FIXED_NOW, user_id="demo_user_01", assertion=None):
+        if assertion is None:
+            assertion = self.sign(choice, now=now)
         return self.database.approve_receipt(
             choice["receipt_id"],
             choice["receipt_digest"],
             user_id,
+            assertion=assertion,
+            context=self.device.context,
+            voice_confirmation="yes, confirm",
             now=now,
         )
 
-    def test_exact_policy_transfer_creates_receipt_authorization_and_execution(self):
-        result = self.database.execute_policy_transfer(
-            self.command(amount_minor=500),
-            now=FIXED_NOW,
+    def test_receipt_never_executes_without_a_device_signature(self):
+        choice = self.create_pending_alicia()["receipt_choices"][0]
+
+        for context in (None, self.device.context):
+            with self.subTest(context=context):
+                with self.assertRaisesRegex(ReceiptRejected, "SIGNED_APPROVAL_REQUIRED"):
+                    self.database.approve_receipt(
+                        choice["receipt_id"],
+                        choice["receipt_digest"],
+                        "demo_user_01",
+                        assertion=None,
+                        context=context,
+                        voice_confirmation="yes, confirm",
+                        now=FIXED_NOW,
+                    )
+
+        self.assertEqual(self.count_rows("authorization_records"), 0)
+        self.assertEqual(self.count_rows("ledger_transactions"), 0)
+        self.assertEqual(
+            self.database.get_receipt(choice["receipt_id"])["status"],
+            "AWAITING_CONFIRMATION",
         )
 
-        receipt = self.database.get_receipt(result["receipt"]["receipt_id"])
-        self.assertEqual(receipt["status"], "EXECUTED")
+    def test_approval_stores_verifiable_signature_evidence(self):
+        choice = self.create_pending_alicia()["receipt_choices"][0]
+
+        result = self.approve(choice)
+
+        self.assertEqual(result["approval"]["credential_kind"], "WEBAUTHN_PLATFORM")
+        with closing(sqlite3.connect(self.db_path)) as connection, connection:
+            stored = connection.execute(
+                "SELECT receipt_id, receipt_digest, credential_id FROM approval_signatures"
+            ).fetchall()
         self.assertEqual(
-            self.scalar("SELECT method FROM authorization_records"),
-            "EXPLICIT_COMMAND_POLICY",
-        )
-        self.assertEqual(self.scalar("SELECT COUNT(*) FROM receipt_executions"), 1)
-        self.assertEqual(
-            [row["delta_minor"] for row in self.database.get_state()["ledger_entries"]],
-            [-500, 500],
+            stored,
+            [(choice["receipt_id"], choice["receipt_digest"], self.device.credential_id)],
         )
 
     def test_approve_pending_receipt_executes_stored_facts(self):
@@ -706,17 +882,20 @@ class DatabaseSeedTests(unittest.TestCase):
             self.scalar("SELECT method FROM authorization_records"),
             "USER_CONFIRMATION",
         )
-        self.assertEqual(self.database.get_state()["accounts"][0]["balance_minor"], 99500)
+        self.assertEqual(self.database.get_state()["accounts"][0]["balance_minor"], 199500)
 
     def test_changed_digest_is_rejected_without_writes(self):
         choice = self.create_pending_alicia()["receipt_choices"][0]
         before = self.database.get_state()
 
-        with self.assertRaisesRegex(ReceiptRejected, "RECEIPT_DIGEST_MISMATCH"):
+        with self.assertRaisesRegex(ReceiptRejected, "APPROVAL_RECEIPT_MISMATCH"):
             self.database.approve_receipt(
                 choice["receipt_id"],
                 "0" * 64,
                 "demo_user_01",
+                assertion=self.sign(choice),
+                context=self.device.context,
+                voice_confirmation="yes, confirm",
                 now=FIXED_NOW,
             )
 
@@ -726,35 +905,34 @@ class DatabaseSeedTests(unittest.TestCase):
     def test_identical_repeated_approval_returns_one_transaction(self):
         choice = self.create_pending_alicia()["receipt_choices"][0]
 
-        first = self.approve(choice)
-        second = self.approve(choice)
+        assertion = self.sign(choice)
+        first = self.approve(choice, assertion=assertion)
+        second = self.approve(choice, assertion=assertion)
 
         self.assertEqual(second["transaction_id"], first["transaction_id"])
         self.assertTrue(second["idempotent_replay"])
         self.assertEqual(self.count_rows("ledger_transactions"), 1)
-
-    def test_user_approval_of_policy_executed_receipt_is_incompatible_retry(self):
-        executed = self.database.execute_policy_transfer(
-            self.command(amount_minor=500),
-            now=FIXED_NOW,
-        )
-        receipt = executed["receipt"]
-
         with self.assertRaisesRegex(ReceiptRejected, "RECEIPT_ALREADY_EXECUTED"):
-            self.database.approve_receipt(
-                receipt["receipt_id"],
-                receipt["receipt_digest"],
-                "demo_user_01",
-                now=FIXED_NOW,
-            )
+            self.sign(choice)
+
+    def test_accepted_signature_cannot_approve_a_different_receipt(self):
+        johns = self.create_pending_johns()["receipt_choices"]
+        assertion = self.sign(johns[0])
+        self.approve(johns[0], assertion=assertion)
+
+        with self.assertRaisesRegex(ReceiptRejected, "APPROVAL_CHALLENGE_REPLAYED"):
+            self.approve(johns[1], assertion=assertion)
 
         self.assertEqual(self.count_rows("ledger_transactions"), 1)
 
     def test_approval_at_expiry_marks_receipt_expired_without_ledger_mutation(self):
         choice = self.create_pending_alicia()["receipt_choices"][0]
 
+        assertion = self.sign(choice, now=FIXED_NOW + timedelta(minutes=4))
         with self.assertRaisesRegex(ReceiptRejected, "RECEIPT_EXPIRED"):
-            self.approve(choice, now=FIXED_NOW + timedelta(minutes=5))
+            self.approve(
+                choice, now=FIXED_NOW + timedelta(minutes=5), assertion=assertion
+            )
 
         self.assertEqual(
             self.database.get_receipt(choice["receipt_id"])["status"],
@@ -770,6 +948,7 @@ class DatabaseSeedTests(unittest.TestCase):
             clock_called.set()
             return FIXED_NOW + timedelta(minutes=5)
 
+        assertion = self.sign(choice, now=FIXED_NOW + timedelta(minutes=4))
         controlled = Database(self.db_path, clock=expired_clock)
         blocker = sqlite3.connect(
             self.db_path,
@@ -783,6 +962,9 @@ class DatabaseSeedTests(unittest.TestCase):
                 choice["receipt_id"],
                 choice["receipt_digest"],
                 "demo_user_01",
+                assertion=assertion,
+                context=self.device.context,
+                voice_confirmation="yes, confirm",
             )
 
         try:
@@ -821,13 +1003,15 @@ class DatabaseSeedTests(unittest.TestCase):
     def test_wrong_user_and_missing_receipt_are_non_mutating(self):
         choice = self.create_pending_alicia()["receipt_choices"][0]
 
-        with self.assertRaisesRegex(ReceiptRejected, "RECEIPT_USER_MISMATCH"):
-            self.approve(choice, user_id="other_user")
+        with self.assertRaisesRegex(ReceiptRejected, "APPROVAL_USER_MISMATCH"):
+            self.approve(choice, user_id="other_user", assertion=self.sign(choice))
         with self.assertRaisesRegex(ReceiptRejected, "RECEIPT_NOT_FOUND"):
             self.database.approve_receipt(
                 "receipt_missing",
                 "0" * 64,
                 "demo_user_01",
+                assertion=None,
+                context=None,
                 now=FIXED_NOW,
             )
 
@@ -843,7 +1027,8 @@ class DatabaseSeedTests(unittest.TestCase):
             with self.subTest(assignment=assignment):
                 self.database.reset()
                 choice = self.create_pending_alicia()["receipt_choices"][0]
-                with sqlite3.connect(self.db_path) as connection:
+                assertion = self.sign(choice)
+                with closing(sqlite3.connect(self.db_path)) as connection, connection:
                     connection.execute(
                         f"UPDATE review_receipts SET {assignment} WHERE receipt_id = ?",
                         (*values, choice["receipt_id"]),
@@ -852,12 +1037,12 @@ class DatabaseSeedTests(unittest.TestCase):
                     ReceiptRejected,
                     "RECEIPT_DIGEST_MISMATCH",
                 ):
-                    self.approve(choice)
+                    self.approve(choice, assertion=assertion)
                 self.assertEqual(self.count_rows("ledger_transactions"), 0)
 
     def test_balance_is_rechecked_at_approval_time(self):
         choice = self.create_pending_alicia()["receipt_choices"][0]
-        with sqlite3.connect(self.db_path) as connection:
+        with closing(sqlite3.connect(self.db_path)) as connection, connection:
             connection.execute(
                 """
                 UPDATE accounts SET balance_minor = 0
@@ -877,7 +1062,7 @@ class DatabaseSeedTests(unittest.TestCase):
     def test_entry_failure_rolls_back_authorization_balance_and_receipt(self):
         choice = self.create_pending_alicia()["receipt_choices"][0]
         before = self.database.get_state()["accounts"]
-        with sqlite3.connect(self.db_path) as connection:
+        with closing(sqlite3.connect(self.db_path)) as connection, connection:
             connection.executescript(
                 """
                 CREATE TRIGGER force_receipt_entry_failure
@@ -902,16 +1087,20 @@ class DatabaseSeedTests(unittest.TestCase):
 
     def test_executed_receipt_replays_after_expiry(self):
         choice = self.create_pending_alicia()["receipt_choices"][0]
-        first = self.approve(choice)
+        assertion = self.sign(choice)
+        first = self.approve(choice, assertion=assertion)
 
-        replay = self.approve(choice, now=FIXED_NOW + timedelta(minutes=10))
+        replay = self.approve(
+            choice, now=FIXED_NOW + timedelta(minutes=10), assertion=assertion
+        )
 
         self.assertEqual(replay["transaction_id"], first["transaction_id"])
         self.assertTrue(replay["idempotent_replay"])
 
     def test_invalid_executed_state_without_link_is_rejected(self):
         choice = self.create_pending_alicia()["receipt_choices"][0]
-        with sqlite3.connect(self.db_path) as connection:
+        assertion = self.sign(choice)
+        with closing(sqlite3.connect(self.db_path)) as connection, connection:
             connection.execute(
                 """
                 UPDATE review_receipts SET status = 'EXECUTED'
@@ -921,17 +1110,18 @@ class DatabaseSeedTests(unittest.TestCase):
             )
 
         with self.assertRaisesRegex(ReceiptRejected, "RECEIPT_INVALID_STATUS"):
-            self.approve(choice)
+            self.approve(choice, assertion=assertion)
 
         self.assertEqual(self.count_rows("ledger_transactions"), 0)
 
     def test_two_threads_approving_one_receipt_create_one_transaction(self):
         choice = self.create_pending_alicia()["receipt_choices"][0]
+        assertion = self.sign(choice)
         barrier = Barrier(2)
 
         def execute():
             barrier.wait()
-            return self.approve(choice)
+            return self.approve(choice, assertion=assertion)
 
         with ThreadPoolExecutor(max_workers=2) as pool:
             futures = (pool.submit(execute), pool.submit(execute))
@@ -939,7 +1129,7 @@ class DatabaseSeedTests(unittest.TestCase):
 
         self.assertEqual(results[0]["transaction_id"], results[1]["transaction_id"])
         self.assertEqual(self.count_rows("ledger_transactions"), 1)
-        self.assertEqual(self.database.get_state()["accounts"][0]["balance_minor"], 99500)
+        self.assertEqual(self.database.get_state()["accounts"][0]["balance_minor"], 199500)
 
     def test_initialize_and_reset_restore_seed_balances(self):
         self.assertEqual(
@@ -948,14 +1138,23 @@ class DatabaseSeedTests(unittest.TestCase):
                 for row in self.database.get_state()["accounts"]
             ],
             [
-                ("savings", 100000),
+                ("savings", 200000),
                 ("Alicia Powell", 7500),
+                ("DBS Credit Card settlement", 0),
+                ("IRAS settlement", 0),
                 ("John Smith", 10000),
                 ("John Tan", 7500),
                 ("JXXX SXXXX", 0),
+                ("Lim Siew Hua", 20000),
+                ("M1 settlement", 0),
+                ("MXXX LXX", 0),
+                ("PUB Water settlement", 0),
+                ("Singtel settlement", 0),
+                ("SP Services settlement", 0),
+                ("StarHub settlement", 0),
             ],
         )
-        self.database.execute_transfer(self.command())
+        self.approve(self.create_pending_alicia()["receipt_choices"][0])
 
         reset_state = self.database.reset()
 
@@ -965,94 +1164,43 @@ class DatabaseSeedTests(unittest.TestCase):
                 for row in reset_state["accounts"]
             ],
             [
-                ("savings", 100000),
+                ("savings", 200000),
                 ("Alicia Powell", 7500),
+                ("DBS Credit Card settlement", 0),
+                ("IRAS settlement", 0),
                 ("John Smith", 10000),
                 ("John Tan", 7500),
                 ("JXXX SXXXX", 0),
+                ("Lim Siew Hua", 20000),
+                ("M1 settlement", 0),
+                ("MXXX LXX", 0),
+                ("PUB Water settlement", 0),
+                ("Singtel settlement", 0),
+                ("SP Services settlement", 0),
+                ("StarHub settlement", 0),
             ],
         )
         self.assertEqual(reset_state["transactions"], [])
 
     def test_transfer_creates_equal_debit_and_credit(self):
-        result = self.database.execute_transfer(self.command())
+        result = self.approve(self.create_pending_alicia()["receipt_choices"][0])
         state = self.database.get_state()
 
         self.assertEqual(result["outcome"], "EXECUTED_SYNTHETIC_TRANSFER")
         balances = {row["label"]: row["balance_minor"] for row in state["accounts"]}
-        self.assertEqual(balances["savings"], 95000)
-        self.assertEqual(balances["John Smith"], 15000)
-        self.assertEqual(balances["Alicia Powell"], 7500)
+        self.assertEqual(balances["savings"], 199500)
+        self.assertEqual(balances["Alicia Powell"], 8000)
+        self.assertEqual(balances["John Smith"], 10000)
         self.assertEqual(balances["John Tan"], 7500)
         self.assertEqual(
             [row["delta_minor"] for row in state["ledger_entries"]],
-            [-5000, 5000],
+            [-500, 500],
         )
         self.assertEqual(state["transactions"][0]["source_label"], "savings")
         self.assertEqual(
             state["transactions"][0]["destination_label"],
-            "John Smith",
+            "Alicia Powell",
         )
-
-    def test_insufficient_funds_leave_balances_unchanged(self):
-        before = self.database.get_state()["accounts"]
-
-        with self.assertRaisesRegex(InsufficientFunds, "INSUFFICIENT_FUNDS"):
-            self.database.execute_transfer(self.command(amount_minor=100001))
-
-        self.assertEqual(self.database.get_state()["accounts"], before)
-
-    def test_identical_retry_returns_recorded_result_without_second_debit(self):
-        first = self.database.execute_transfer(self.command())
-        second = self.database.execute_transfer(self.command())
-
-        self.assertEqual(second, first)
-        state = self.database.get_state()
-        self.assertEqual(len(state["transactions"]), 1)
-        self.assertEqual(state["accounts"][0]["balance_minor"], 95000)
-
-    def test_changed_text_with_same_request_id_is_an_idempotency_conflict(self):
-        self.database.execute_transfer(self.command())
-        changed = dataclasses.replace(
-            self.command(),
-            original_text="Send John Smith S$60 from savings.",
-        )
-
-        with self.assertRaisesRegex(IdempotencyConflict, "IDEMPOTENCY_CONFLICT"):
-            self.database.execute_transfer(changed)
-
-    def test_insert_failure_rolls_back_both_balance_updates(self):
-        before = self.database.get_state()["accounts"]
-        with sqlite3.connect(self.db_path) as connection:
-            connection.executescript(
-                """
-                CREATE TRIGGER force_entry_failure
-                BEFORE INSERT ON ledger_entries
-                BEGIN SELECT RAISE(ABORT, 'forced entry failure'); END;
-                """
-            )
-
-        with self.assertRaisesRegex(sqlite3.IntegrityError, "forced entry failure"):
-            self.database.execute_transfer(self.command())
-
-        self.assertEqual(self.database.get_state()["accounts"], before)
-        self.assertEqual(self.database.get_state()["transactions"], [])
-
-    def test_two_threads_with_same_request_id_create_one_transaction(self):
-        barrier = Barrier(2)
-
-        def execute():
-            barrier.wait()
-            return self.database.execute_transfer(self.command())
-
-        with ThreadPoolExecutor(max_workers=2) as pool:
-            futures = (pool.submit(execute), pool.submit(execute))
-            results = [future.result() for future in futures]
-
-        self.assertEqual(results[0], results[1])
-        state = self.database.get_state()
-        self.assertEqual(len(state["transactions"]), 1)
-        self.assertEqual(state["accounts"][0]["balance_minor"], 95000)
 
     def test_exact_resolution_normalizes_case_and_whitespace(self):
         result = self.database.resolve_beneficiary("  JOHN SMITH ")
@@ -1122,7 +1270,7 @@ class DatabaseSeedTests(unittest.TestCase):
         finally:
             blocker.close()
 
-        self.assertEqual(state["accounts"][0]["balance_minor"], 100000)
+        self.assertEqual(state["accounts"][0]["balance_minor"], 200000)
 
 
 if __name__ == "__main__":

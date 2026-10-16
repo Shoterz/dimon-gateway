@@ -2,21 +2,17 @@ from __future__ import annotations
 
 import asyncio
 import json
-import time
 import unittest
 from uuid import UUID, uuid4
 
 import httpx
-import jwt
-from cryptography.hazmat.primitives.asymmetric import rsa
 
 from services.inference_gateway.app import create_gateway_app
-from services.inference_gateway.auth import AccessTokenVerifier
 from services.inference_gateway.observability import (
     CapabilityReadiness,
     GatewayObservability,
 )
-from services.inference_gateway.tests.test_auth import StaticJwksClient, valid_env
+from services.inference_gateway.tests.test_auth import valid_env
 from services.inference_gateway.tests.test_intent_endpoint import FakeIntentUpstream
 from services.inference_gateway.tests.test_transcription_endpoint import (
     FakeRecognizer,
@@ -48,38 +44,18 @@ class FakeProbe:
 class ObservabilityTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
-        cls.private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
         cls.config = __import__(
             "services.inference_gateway.config", fromlist=["GatewayConfig"]
         ).GatewayConfig.from_env(valid_env())
 
     def token(self, *, subject: str = "service-client") -> str:
-        now = int(time.time())
-        return jwt.encode(
-            {
-                "type": "app",
-                "iss": self.config.access_issuer,
-                "aud": [self.config.access_audience],
-                "iat": now - 1,
-                "nbf": now - 1,
-                "exp": now + 60,
-                "sub": subject,
-                "email": "friend@example.com",
-            },
-            self.private_key,
-            algorithm="RS256",
-            headers={"kid": "test-key"},
-        )
+        del subject
+        return self.config.service_key
 
     def app(self, *, probes=None, timeout=0.1, logger=None, upstream=None):
-        verifier = AccessTokenVerifier(
-            self.config,
-            jwks_client=StaticJwksClient(self.private_key.public_key()),
-        )
         observability = GatewayObservability(logger=logger or MemoryLogger())
         app = create_gateway_app(
             self.config,
-            verifier=verifier,
             intent_upstream=upstream or FakeIntentUpstream(),
             readiness_probes=probes,
             readiness_timeout=timeout,
@@ -90,7 +66,7 @@ class ObservabilityTests(unittest.TestCase):
     async def request(self, app, path: str, *, token=True, headers=None, json_body=None):
         selected_headers = dict(headers or {})
         if token:
-            selected_headers["cf-access-jwt-assertion"] = self.token()
+            selected_headers["authorization"] = f"Bearer {self.token()}"
         transport = httpx.ASGITransport(app=app, client=("127.0.0.1", 1234))
         async with httpx.AsyncClient(transport=transport, base_url="http://gateway.test") as client:
             if json_body is None:
@@ -176,7 +152,7 @@ class ObservabilityTests(unittest.TestCase):
             self.request(
                 app,
                 "/v1/intent",
-                headers={"cf-access-jwt-assertion": token},
+                headers={"authorization": f"Bearer {token}"},
                 token=False,
                 json_body={
                     "request_id": request_id,

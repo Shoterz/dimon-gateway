@@ -4,10 +4,14 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import inspect
 import json
+import logging
 import math
 import struct
+from uuid import uuid4
+import wave
 from pathlib import Path
 from typing import Any
 from typing import Awaitable, Callable
@@ -15,20 +19,101 @@ from typing import Awaitable, Callable
 from starlette.websockets import WebSocketDisconnect
 
 from .model_adapter import InferenceFailure
+from .spoken_normalization import normalize_spoken_request
+
+logger = logging.getLogger(__name__)
 
 
 class VoiceError(RuntimeError):
-    def __init__(self, reason_code: str):
+    def __init__(self, reason_code: str, failure_stage: str = "voice_pipeline"):
         super().__init__(reason_code)
         self.reason_code = reason_code
+        self.failure_stage = failure_stage
 
 
 class VoiceLimitError(VoiceError):
     pass
 
 
+_NEMOTRON_PHASES = {
+    "websocket_connect": "connect",
+    "handshake_session_created": "ready_timeout",
+    "handshake_session_updated": "ready_timeout",
+    "transcription_receive": "stream_closed",
+    "transcription_finish": "stream_closed",
+    "transcription_event_parse": "protocol",
+    "transcription_delta": "protocol",
+    "unexpected_transcription_event": "protocol",
+    "transcription_final": "empty_final",
+    "transcription_error_event": "upstream_error",
+}
+
+
+def nemotron_failure_phase(failure_stage: str) -> str:
+    """Return a bounded diagnostic phase that contains no upstream details."""
+
+    return _NEMOTRON_PHASES.get(failure_stage, "protocol")
+
+
 class NemotronLifecycleError(RuntimeError):
     pass
+
+
+class NemotronLifecycleLease:
+    """One independently releasable Nemotron supervisor lease."""
+
+    def __init__(
+        self,
+        client: "NemotronLifecycleClient",
+        lease_id: str,
+        *,
+        heartbeat_seconds: float = 10.0,
+    ) -> None:
+        if heartbeat_seconds <= 0:
+            raise ValueError("heartbeat_seconds must be positive")
+        self.client = client
+        self.lease_id = lease_id
+        self.heartbeat_seconds = float(heartbeat_seconds)
+        self._released = False
+        self._heartbeat_task: asyncio.Task[None] | None = None
+
+    def start(self) -> "NemotronLifecycleLease":
+        if self._released:
+            raise RuntimeError("cannot start a released Nemotron lease")
+        if self._heartbeat_task is None or self._heartbeat_task.done():
+            self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
+        return self
+
+    async def release(self, *, disconnected: bool = False) -> None:
+        if self._released:
+            return
+        self._released = True
+        heartbeat_task, self._heartbeat_task = self._heartbeat_task, None
+        if heartbeat_task is not None and not heartbeat_task.done():
+            heartbeat_task.cancel()
+            await asyncio.gather(heartbeat_task, return_exceptions=True)
+        await self.client._request(
+            {
+                "op": "release",
+                "lease_id": self.lease_id,
+                "disconnected": bool(disconnected),
+            }
+        )
+
+    async def _heartbeat_loop(self) -> None:
+        try:
+            while True:
+                await asyncio.sleep(self.heartbeat_seconds)
+                await self.client._request(
+                    {"op": "heartbeat", "lease_id": self.lease_id}
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # lease expires safely in the supervisor
+            logger.warning(
+                "nemotron_lifecycle_heartbeat_failed error_type=%s",
+                type(exc).__name__,
+            )
 
 
 class NemotronLifecycleClient:
@@ -40,29 +125,32 @@ class NemotronLifecycleClient:
         *,
         timeout: float = 120.0,
         max_response_bytes: int = 1_048_576,
+        heartbeat_seconds: float = 10.0,
     ):
         self.socket_path = Path(socket_path)
         if not self.socket_path.is_absolute():
             raise ValueError("Nemotron control socket must be absolute")
-        if timeout <= 0 or max_response_bytes <= 0:
+        if timeout <= 0 or max_response_bytes <= 0 or heartbeat_seconds <= 0:
             raise ValueError("invalid Nemotron lifecycle limits")
         self.timeout = float(timeout)
         self.max_response_bytes = int(max_response_bytes)
-        self._acquired = False
+        self.heartbeat_seconds = float(heartbeat_seconds)
 
-    async def acquire(self) -> dict[str, object]:
-        response = await self._request({"op": "acquire"})
-        self._acquired = True
-        return response
+    async def acquire(self) -> NemotronLifecycleLease:
+        lease_id = uuid4().hex
+        await self._request({"op": "acquire", "lease_id": lease_id})
+        return NemotronLifecycleLease(
+            self,
+            lease_id,
+            heartbeat_seconds=self.heartbeat_seconds,
+        ).start()
 
-    async def release(self, *, disconnected: bool = False) -> None:
-        if not self._acquired:
-            return
-        request: dict[str, object] = {"op": "release"}
-        if disconnected:
-            request["disconnected"] = True
-        await self._request(request)
-        self._acquired = False
+    async def status(self) -> dict[str, object]:
+        response = await self._request({"op": "status"})
+        status = response.get("status")
+        if not isinstance(status, dict):
+            raise NemotronLifecycleError("Invalid Nemotron lifecycle status")
+        return status
 
     async def _request(self, request: dict[str, object]) -> dict[str, object]:
         payload = json.dumps(request, separators=(",", ":")).encode() + b"\n"
@@ -176,24 +264,30 @@ class VoiceTurnDetector:
 
 
 class VoiceLease:
-    """A process-wide, non-queued lease for the single local speech model."""
+    """A non-queued lease on the speech recogniser.
 
-    def __init__(self):
-        self._lock = asyncio.Lock()
+    A local model on one GPU serves one utterance at a time (capacity 1). A
+    cloud recogniser such as TRTC scales out, so its capacity is set by
+    DIMON_VOICE_CONCURRENCY instead of capping the whole server at one user.
+    """
+
+    def __init__(self, capacity: int = 1):
+        self.capacity = max(1, int(capacity))
+        self._active = 0
 
     @property
     def active_count(self) -> int:
-        return int(self._lock.locked())
+        return self._active
 
     async def acquire(self) -> bool:
-        if self._lock.locked():
+        if self._active >= self.capacity:
             return False
-        await self._lock.acquire()
+        self._active += 1
         return True
 
     def release(self) -> None:
-        if self._lock.locked():
-            self._lock.release()
+        if self._active > 0:
+            self._active -= 1
 
 
 def float32le_to_pcm16(audio: bytes) -> bytes:
@@ -251,15 +345,16 @@ class NemotronClient:
         except VoiceError:
             raise
         except Exception as exc:
-            raise VoiceError("NEMOTRON_UNAVAILABLE") from exc
+            raise VoiceError("NEMOTRON_UNAVAILABLE", "websocket_connect") from exc
 
     async def _expect(self, websocket, expected: str) -> None:
+        stage = f"handshake_{expected.replace('.', '_')}"
         try:
             event = json.loads(await asyncio.wait_for(websocket.recv(), self.connect_timeout))
         except Exception as exc:
-            raise VoiceError("NEMOTRON_UNAVAILABLE") from exc
+            raise VoiceError("NEMOTRON_UNAVAILABLE", stage) from exc
         if event.get("type") != expected:
-            raise VoiceError("NEMOTRON_UNAVAILABLE")
+            raise VoiceError("NEMOTRON_UNAVAILABLE", stage)
 
 
 class NemotronStream:
@@ -290,11 +385,11 @@ class NemotronStream:
             raise
         except Exception as exc:
             await self.close()
-            raise VoiceError("NEMOTRON_UNAVAILABLE") from exc
+            raise VoiceError("NEMOTRON_UNAVAILABLE", "session_update") from exc
 
     async def push_audio(self, audio: bytes) -> None:
         if self.websocket is None:
-            raise VoiceError("NEMOTRON_UNAVAILABLE")
+            raise VoiceError("NEMOTRON_UNAVAILABLE", "audio_push")
         try:
             pcm = float32le_to_pcm16(audio)
             if pcm:
@@ -302,18 +397,18 @@ class NemotronStream:
         except VoiceError:
             raise
         except Exception as exc:
-            raise VoiceError("NEMOTRON_UNAVAILABLE") from exc
+            raise VoiceError("NEMOTRON_UNAVAILABLE", "audio_push") from exc
 
     async def finish(self) -> str:
         if self.websocket is None or self.result is None:
-            raise VoiceError("NEMOTRON_UNAVAILABLE")
+            raise VoiceError("NEMOTRON_UNAVAILABLE", "transcription_finish")
         try:
             await self.websocket.send(json.dumps({"type": "input_audio_buffer.commit"}))
             return await asyncio.wait_for(asyncio.shield(self.result), self.client.result_timeout)
         except VoiceError:
             raise
         except Exception as exc:
-            raise VoiceError("NEMOTRON_UNAVAILABLE") from exc
+            raise VoiceError("NEMOTRON_UNAVAILABLE", "transcription_finish") from exc
         finally:
             await self.close()
 
@@ -343,32 +438,35 @@ class NemotronStream:
                 try:
                     payload = json.loads(event)
                 except (TypeError, json.JSONDecodeError) as exc:
-                    raise VoiceError("NEMOTRON_UNAVAILABLE") from exc
+                    raise VoiceError("NEMOTRON_UNAVAILABLE", "transcription_event_parse") from exc
                 event_type = payload.get("type")
                 if event_type == "conversation.item.input_audio_transcription.delta":
                     delta = payload.get("delta")
                     if not isinstance(delta, str):
-                        raise VoiceError("NEMOTRON_UNAVAILABLE")
+                        raise VoiceError("NEMOTRON_UNAVAILABLE", "transcription_delta")
                     transcript += delta
                     await self.on_partial(transcript)
                 elif event_type == "conversation.item.input_audio_transcription.completed":
                     final = payload.get("transcript")
                     if not isinstance(final, str) or not final.strip():
-                        raise VoiceError("NEMOTRON_UNAVAILABLE")
+                        raise VoiceError("NEMOTRON_UNAVAILABLE", "transcription_final")
                     if not self.result.done():
                         self.result.set_result(final.strip())
                     return
                 elif event_type == "input_audio_buffer.committed":
                     continue
                 elif event_type == "error":
-                    raise VoiceError("NEMOTRON_UNAVAILABLE")
+                    raise VoiceError("NEMOTRON_UNAVAILABLE", "transcription_error_event")
                 else:
-                    raise VoiceError("NEMOTRON_UNAVAILABLE")
+                    raise VoiceError("NEMOTRON_UNAVAILABLE", "unexpected_transcription_event")
         except asyncio.CancelledError:
             raise
         except Exception as exc:
             if not self.result.done():
-                self.result.set_exception(exc if isinstance(exc, VoiceError) else VoiceError("NEMOTRON_UNAVAILABLE"))
+                self.result.set_exception(
+                    exc if isinstance(exc, VoiceError)
+                    else VoiceError("NEMOTRON_UNAVAILABLE", "transcription_receive")
+                )
 
 
 ActionCallback = Callable[[str], Awaitable[dict] | dict]
@@ -386,7 +484,9 @@ class VoiceBridge:
         endpoint_silence_seconds: float = 1.40,
         pause_seconds: float = 0.30,
         speech_threshold: float = 0.015,
+        evidence_dir: Path | None = None,
     ):
+        self.evidence_dir = Path(evidence_dir) if evidence_dir is not None else None
         self.recognizer = recognizer
         self.lifecycle = lifecycle
         self.lease = lease or VoiceLease()
@@ -395,6 +495,27 @@ class VoiceBridge:
         self.endpoint_silence_seconds = float(endpoint_silence_seconds)
         self.pause_seconds = float(pause_seconds)
         self.speech_threshold = float(speech_threshold)
+
+    def _voice_evidence(self, audio: bytes, transcript: str) -> dict[str, Any]:
+        """Audit evidence for one utterance: the raw audio's hash and, when an
+        evidence directory is configured, the audio itself as a 16 kHz WAV."""
+
+        evidence: dict[str, Any] = {
+            "transcript": transcript,
+            "audio_sha256": hashlib.sha256(audio).hexdigest(),
+            "audio_seconds": round(len(audio) / 4 / 16_000, 2),
+            "encoding": "float32le/16000",
+        }
+        if self.evidence_dir is not None:
+            self.evidence_dir.mkdir(parents=True, exist_ok=True)
+            path = self.evidence_dir / f"{evidence['audio_sha256']}.wav"
+            with wave.open(str(path), "wb") as wav_file:
+                wav_file.setnchannels(1)
+                wav_file.setsampwidth(2)
+                wav_file.setframerate(16_000)
+                wav_file.writeframes(float32le_to_pcm16(audio))
+            evidence["audio_file"] = path.name
+        return evidence
 
     def validate_audio(self, chunk: bytes, current_bytes: int = 0) -> None:
         if not isinstance(chunk, bytes) or len(chunk) == 0 or len(chunk) % 4:
@@ -406,14 +527,26 @@ class VoiceBridge:
             raise VoiceLimitError("UTTERANCE_LIMIT_EXCEEDED")
 
     async def handle(self, websocket, context, action_callback: ActionCallback) -> None:
+        from .speech import transcription_disagreement_message
+        from .transcript_arbitration import arbitrate_transcripts
+
+        diagnostic_id = uuid4().hex
         if not await self.lease.acquire():
+            logger.warning(json.dumps({
+                "event": "voice_pipeline_failed",
+                "diagnostic_id": diagnostic_id,
+                "stage": "voice_lease_acquire",
+                "reason_code": "VOICE_BUSY",
+            }, sort_keys=True, separators=(",", ":")))
             await websocket.accept()
             await websocket.send_json({"type": "error", "reason_code": "VOICE_BUSY"})
             await self._close(websocket, 1013)
             return
         stream = None
-        lifecycle_acquired = False
+        lifecycle_lease = None
         disconnected = False
+        upstream_disconnected = False
+        stage = "voice_session_start"
         try:
             await websocket.accept()
             chunks: list[bytes] = []
@@ -425,18 +558,25 @@ class VoiceBridge:
                 speech_threshold=self.speech_threshold,
             )
 
+            latest_partial = ""
+
             async def partial(text: str) -> None:
+                nonlocal latest_partial
+                if isinstance(text, str) and text.strip():
+                    latest_partial = text.strip()
                 await websocket.send_json({"type": "transcript_partial", "text": text})
 
             if self.lifecycle is not None:
+                stage = "nemotron_lifecycle_acquire"
                 try:
-                    await self.lifecycle.acquire()
-                    lifecycle_acquired = True
+                    lifecycle_lease = await self.lifecycle.acquire()
                 except NemotronLifecycleError as exc:
-                    raise VoiceError("NEMOTRON_UNAVAILABLE") from exc
+                    raise VoiceError("NEMOTRON_UNAVAILABLE", "lifecycle_acquire") from exc
             open_stream = getattr(self.recognizer, "open_stream", None)
             if callable(open_stream):
+                stage = "nemotron_stream_open"
                 stream = await open_stream(partial)
+            stage = "microphone_audio_receive"
             await websocket.send_json({"type": "ready", "sample_rate": 16_000})
             while True:
                 message = await websocket.receive()
@@ -449,7 +589,9 @@ class VoiceBridge:
                     chunks.append(chunk)
                     total += len(chunk)
                     if stream is not None:
+                        stage = "nemotron_audio_push"
                         await stream.push_audio(chunk)
+                    stage = "microphone_audio_receive"
                     events = detector.push(chunk)
                     if "pause" in events and "endpoint" not in events:
                         await websocket.send_json({"type": "pause"})
@@ -474,34 +616,100 @@ class VoiceBridge:
                     raise VoiceLimitError("MALFORMED_FRAME")
                 break
             audio = b"".join(chunks)
+            stage = "nemotron_transcription_finish"
             if stream is not None:
                 transcript = await stream.finish()
             else:
                 transcript = await self.recognizer.transcribe(audio, partial)
+            decision = arbitrate_transcripts(latest_partial, transcript)
+            if decision.status == "CONFIRM_LIVE":
+                question = transcription_disagreement_message(latest_partial)
+                await websocket.send_json({
+                    "type": "transcript_conflict",
+                    "live_text": latest_partial,
+                    "final_text": transcript,
+                })
+                await websocket.send_json({
+                    "type": "action_result",
+                    "result": {
+                        "outcome": "CLARIFICATION_REQUEST",
+                        "reason_code": "TRANSCRIPTION_DISAGREEMENT",
+                        "answer": question,
+                        "question": question,
+                        "transcription_disagreement": {
+                            "live_text": latest_partial,
+                            "final_text": transcript,
+                        },
+                    },
+                })
+                await self._close(websocket, 1000)
+                return
+            stage = "action_dispatch"
             await websocket.send_json({"type": "transcript_final", "text": transcript})
-            result = action_callback(transcript)
+            normalized_transcript = normalize_spoken_request(transcript)
+            evidence = self._voice_evidence(audio, transcript)
+            if normalized_transcript != transcript:
+                evidence["normalized_transcript"] = normalized_transcript
+            if len(inspect.signature(action_callback).parameters) >= 2:
+                result = action_callback(normalized_transcript, evidence)
+            else:
+                result = action_callback(normalized_transcript)
             if inspect.isawaitable(result):
                 result = await result
+            if (
+                isinstance(result, dict)
+                and result.get("outcome") == "BLOCKED"
+                and result.get("reason_code") == "APP_LOCKED"
+            ):
+                await websocket.send_json({"type": "error", "reason_code": "APP_LOCKED"})
+                await self._close(websocket, 1008)
+                return
             await websocket.send_json({"type": "action_result", "result": result})
             await self._close(websocket, 1000)
         except WebSocketDisconnect:
             disconnected = True
             return
         except VoiceError as exc:
+            upstream_phase = nemotron_failure_phase(getattr(exc, "failure_stage", ""))
+            upstream_disconnected = upstream_phase in {
+                "connect", "ready_timeout", "stream_closed", "upstream_error"
+            }
+            logger.warning(json.dumps({
+                "event": "voice_pipeline_failed",
+                "diagnostic_id": diagnostic_id,
+                "stage": stage,
+                "upstream_stage": upstream_phase,
+                "reason_code": exc.reason_code,
+                "error_type": type(exc).__name__,
+            }, sort_keys=True, separators=(",", ":")))
             await websocket.send_json({"type": "error", "reason_code": exc.reason_code})
             await self._close(websocket, 1003)
         except InferenceFailure as exc:
+            logger.warning(json.dumps({
+                "event": "voice_pipeline_failed",
+                "diagnostic_id": diagnostic_id,
+                "stage": stage,
+                "upstream_stage": getattr(exc, "failure_stage", ""),
+                "reason_code": exc.reason_code,
+                "error_type": type(exc).__name__,
+            }, sort_keys=True, separators=(",", ":")))
             await websocket.send_json({"type": "error", "reason_code": exc.reason_code})
             await self._close(websocket, 1011)
         finally:
-            if stream is not None:
-                close = getattr(stream, "close", None)
-                if callable(close):
-                    await close()
-            if lifecycle_acquired and self.lifecycle is not None:
-                with contextlib.suppress(Exception):
-                    await self.lifecycle.release(disconnected=disconnected)
-            self.lease.release()
+            try:
+                if stream is not None:
+                    close = getattr(stream, "close", None)
+                    if callable(close):
+                        await close()
+            finally:
+                try:
+                    if lifecycle_lease is not None:
+                        with contextlib.suppress(Exception):
+                            await lifecycle_lease.release(
+                                disconnected=disconnected or upstream_disconnected
+                            )
+                finally:
+                    self.lease.release()
 
     @staticmethod
     async def _close(websocket, code: int) -> None:

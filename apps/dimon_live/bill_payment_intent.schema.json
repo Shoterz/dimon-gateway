@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Dimon Live bill-payment proposal intent v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contract_version",
+    "kind",
+    "biller_label",
+    "biller_evidence",
+    "amount_evidence",
+    "currency",
+    "currency_evidence",
+    "source_account_label",
+    "source_account_evidence",
+    "requested_execution_date",
+    "execution_date_evidence"
+  ],
+  "properties": {
+    "contract_version": {"const": 1},
+    "kind": {"enum": ["BILL_PAYMENT", "NOT_BILL_PAYMENT"]},
+    "biller_label": {"type": ["string", "null"]},
+    "biller_evidence": {"type": ["string", "null"]},
+    "amount_evidence": {"type": ["string", "null"]},
+    "currency": {"enum": ["SGD", null]},
+    "currency_evidence": {"type": ["string", "null"]},
+    "source_account_label": {"type": ["string", "null"]},
+    "source_account_evidence": {"type": ["string", "null"]},
+    "requested_execution_date": {"type": ["string", "null"]},
+    "execution_date_evidence": {"type": ["string", "null"]}
+  }
+}

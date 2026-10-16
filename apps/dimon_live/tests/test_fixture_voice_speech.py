@@ -72,8 +72,10 @@ class FixtureVoiceTests(unittest.TestCase):
 
     def test_voice_lifecycle_supports_normal_unavailable_and_busy(self) -> None:
         normal = FixtureVoiceLifecycle.load(VOICE_MANIFEST, "normal")
-        self.assertEqual(asyncio.run(normal.acquire()), {"ok": True, "fixture": True})
-        asyncio.run(normal.release())
+        lease = asyncio.run(normal.acquire())
+        self.assertEqual(lease.status, {"ok": True, "fixture": True})
+        asyncio.run(lease.release())
+        asyncio.run(lease.release())
 
         expected = {
             "nemotron-unavailable": "UPSTREAM_UNAVAILABLE",

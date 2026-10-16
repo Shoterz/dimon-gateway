@@ -1,5 +1,46 @@
 # Dimon Live
 
+## Hands-free readiness and speech recovery
+
+The red D preparation control is green only when the backend models, browser
+audio context, microphone/worklet, and hands-free WebSocket are all ready. Its
+intermediate states distinguish service warming from microphone startup; audio
+captured while the socket opens is limited to a one-second rolling pre-buffer.
+
+All spoken replies use the visible Dimon audio player. When iOS Safari rejects
+autoplay, the player stays visible and paused with a tap-to-play instruction.
+The microphone remains suppressed until that same player reaches `ended` (or
+the turn is explicitly cancelled), preventing Dimon from transcribing its own
+reply or skipping speech the user never heard.
+
+Warm wake recognition uses Nemotron streaming partials only to recognize the
+bounded `Hey|Hi Dimon|Diamon|Diamond` wake phrase and show live captions.
+Faster-Whisper remains authoritative for the completed request; partial text is
+never dispatched as a banking command. A registered voice must positively
+match before an early wake is emitted. Unknown, timed-out, and mismatched
+speaker checks fail closed; without a registered voice, any speaker can wake
+the demo.
+
+The inference gateway retries a failed Nemotron caption connection twice for
+each new utterance without reopening or replacing Faster-Whisper. While the
+five-minute prepared window is active, it also opens and closes a real caption
+stream every 15 seconds. A failed probe marks only Nemotron degraded, later
+probes retry it, and a successful probe restores readiness. Diagnostic logs use
+content-free phases (`connect`, `ready_timeout`, `stream_closed`, `protocol`,
+`empty_final`, and `upstream_error`) and never include transcript or audio.
+
+Physical-device acceptance on iPhone Safari:
+
+1. Reload, tap D, and wait for **Ready — say “Hey Dimon”**.
+2. Confirm blocked autoplay exposes the paused player, then tap play; listening
+   must resume only after playback finishes.
+3. Run five first-wake trials and measure phrase-end to Ask-screen time. The
+   warm-path target is a median of 2.0 seconds or less.
+4. After voice registration, confirm the registered voice wakes Dimon and a
+   different speaker does not. Before registration, confirm either can wake it.
+5. Speak immediately when listening appears and confirm the opening words are
+   preserved by the pre-buffer.
+
 ## Public MVP gateway
 
 Run the gateway from the repository root with:
@@ -135,6 +176,61 @@ Open [http://127.0.0.1:8890](http://127.0.0.1:8890).
 The runtime database defaults to `apps/dimon_live/data/demo.sqlite3`. Set
 `DIMON_DB_PATH` to use another local path.
 
+## Private pipeline diagnostics
+
+Pipeline diagnostics are written to the Dimon or inference-gateway process
+logs; they are not rendered in the browser. Stock lookup records the grounded
+instrument label, provider candidate symbols/names/exchanges, selected symbol,
+and failure reason under the action request ID. Speech records artifact queue,
+generation, fetch, and playback outcomes under that same request ID. Voice
+records the failing pipeline phase and, for Nemotron, the failed connection,
+handshake, audio, or transcription phase. These diagnostic events omit raw
+utterances, transcripts, audio, payment amounts, and service keys.
+
+When Dimon is started in the foreground, inspect its terminal output for
+`stock_instrument_`, `speech_artifact_`, `voice_pipeline_failed`, and
+`voice_client_failure` events. For the GPU host's inference-gateway logs, use:
+
+```bash
+journalctl --user -u dimon-inference-gateway.service --since today \
+  | rg 'transcription_upstream_failed|gateway_request'
+```
+
+Use the action `request_id` shown in the result/audit record to correlate stock
+lookup and reply-audio events. A Nemotron gateway event also includes its
+`correlation_id` and stage, so a failed websocket connection can be separated
+from a failed session handshake or transcription stream.
+
+## Real-stock paper purchase flow
+
+Real stock requests use Yahoo Finance research and the isolated paper-equity
+contract. The old fictional instrument catalog is not used for these requests.
+Set `DIMON_REAL_STOCK_EXECUTION_ENABLED=0` to disable only the paper-order
+routes; payments, bills, and the legacy investment demo remain available.
+
+Try:
+
+1. `I want to put $500 into NVIDIA.`
+2. Choose **Buy now** (or say `set a maximum price`, then provide a price and
+   `DAY`/`GTC`).
+3. Review the paper receipt. Approval is on-screen: mock Singpass, face scan,
+   and device signature. Voice can draft or revise, but never approves.
+
+The receipt lifecycle is exposed through:
+
+```text
+GET  /api/paper-equity/orders/{order_id}
+POST /api/paper-equity/orders/{order_id}/refresh
+POST /api/paper-equity/orders/{order_id}/singpass
+POST /api/paper-equity/orders/{order_id}/challenge
+POST /api/paper-equity/orders/{order_id}/approve
+POST /api/paper-equity/orders/{order_id}/cancel
+```
+
+Only a `FILLED` result changes the synthetic savings balance and paper
+holdings. A market order queues when the exchange is closed; a limit order
+stays open above its maximum price. No route sends an order to a broker.
+
 ## Seed ledger
 
 | Account | Starting balance |
@@ -243,3 +339,31 @@ are entirely synthetic. This application is not connected to PayNow, a bank,
 broker, or any payment rail. Never
 replace its synthetic executor with a real-money integration without a new
 authorization, confirmation, authentication, audit, and threat model.
+
+# Grouped multi-action requests
+
+Ask can extract two or three ordered bill-payment, saved-recipient transfer, and
+stock-investment actions from one request. Qwen returns only exact transcript
+spans; each existing domain parser grounds its own amount, recipient, biller,
+instrument, and size. If an action cannot be resolved, the group is blocked
+before any review receipt is created. Submitting the request never moves money
+or places an order.
+
+Supported payment children appear together and keep independent approval
+controls. Their authentication tier is selected using the combined bill and
+friend-transfer amount. A stock child continues through the existing quote and
+paper-order review and uses its existing approval requirements. If the request
+already says “at market,” Dimon carries that choice into the review card rather
+than asking the same question again. Group status is available from
+`GET /api/multi-actions/{group_id}` and is scoped to the current user's ledger.
+
+Example:
+
+> Please pay my PopWater bill, send Alicia Powell forty five dollars for dining,
+> and buy two shares of NVIDIA at market using my investment account.
+
+`PopWater` is a registered voice alias for the synthetic PUB Water biller; the
+demo's statement amount is shown for review. Each payment needs its own approval,
+and both use the combined payment total to select the authentication tier. The
+stock order has its own device approval. No balance or holding changes until
+each matching approval succeeds.

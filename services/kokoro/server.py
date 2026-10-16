@@ -10,6 +10,9 @@ from dataclasses import dataclass
 from pydantic import BaseModel, ConfigDict, Field
 
 
+KOKORO_SPEED = 1.20
+
+
 class SpeechRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     text: str = Field(min_length=1, max_length=1_000)
@@ -44,7 +47,7 @@ class KokoroEngine:
         import numpy as np
 
         segments = []
-        for result in self.pipeline(text, voice="af_heart", speed=1.15):
+        for result in self.pipeline(text, voice="af_heart", speed=KOKORO_SPEED):
             if result.audio is not None:
                 segments.append(result.audio.detach().cpu().numpy())
         if not segments:
@@ -88,7 +91,8 @@ def main() -> None:
     parser.add_argument("--config", required=True)
     parser.add_argument("--voice", required=True)
     parser.add_argument("--host", choices=("127.0.0.1",), required=True)
-    parser.add_argument("--port", type=int, choices=(3001,), required=True)
+    # Loopback-only is the boundary; the port may move off a busy default.
+    parser.add_argument("--port", type=int, choices=range(1024, 65536), metavar="PORT", required=True)
     args = parser.parse_args()
     engine = KokoroEngine(KokoroPaths(args.model, args.config, args.voice))
     import uvicorn

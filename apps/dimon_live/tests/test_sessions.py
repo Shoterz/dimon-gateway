@@ -7,7 +7,10 @@ from pathlib import Path
 
 import httpx
 
+from apps.dimon_live.approval_gateway import b64url_encode
 from apps.dimon_live.model_adapter import ExtractedIntent
+from apps.dimon_live.tests.device_signer import SoftwareAuthenticator
+from apps.dimon_live.tests.face_fake import FakeFaceEngine, live_frames
 from apps.dimon_live.session_manager import OwnerAccessError, SessionManager
 
 
@@ -48,14 +51,15 @@ class SessionIsolationTests(unittest.TestCase):
         )
 
     def tearDown(self):
+        self.manager.close()
         self.temp_dir.cleanup()
 
     def test_two_visitors_get_independent_seeded_databases(self):
         first = self.manager.create_visitor()
         second = self.manager.create_visitor()
         self.assertNotEqual(first.database.path, second.database.path)
-        self.assertEqual(first.database.get_state()["accounts"][0]["balance_minor"], 100000)
-        self.assertEqual(second.database.get_state()["accounts"][0]["balance_minor"], 100000)
+        self.assertEqual(first.database.get_state()["accounts"][0]["balance_minor"], 200000)
+        self.assertEqual(second.database.get_state()["accounts"][0]["balance_minor"], 200000)
 
         first.database.reset()
         self.assertEqual(second.database.get_state()["transactions"], [])
@@ -106,6 +110,7 @@ class SessionIsolationTests(unittest.TestCase):
         )
         self.assertEqual(context.role, "visitor")
         self.assertNotEqual(context.database.path, manager.owner_path)
+        manager.close()
 
 
 class SessionApiTests(unittest.TestCase):
@@ -136,6 +141,8 @@ class SessionApiTests(unittest.TestCase):
             self.assertEqual(one.status_code, 200)
             self.assertEqual(two.status_code, 200)
         finally:
+            if "app" in locals():
+                app.state.session_manager.close()
             temp_dir.cleanup()
 
     def test_transfer_in_visitor_a_does_not_change_visitor_b_or_owner(self):
@@ -149,29 +156,81 @@ class SessionApiTests(unittest.TestCase):
                 owner_path=root / "owner.sqlite3",
                 visitor_dir=root / "visitors",
                 allowed_origins={"http://test"},
+                face_engine=FakeFaceEngine(),
             )
+
+            def frames(person="visitor-a"):
+                return [base64.b64encode(frame).decode() for frame in live_frames(person)]
 
             async def run():
                 transport = httpx.ASGITransport(app=app)
                 async with httpx.AsyncClient(transport=transport, base_url="http://test") as first, httpx.AsyncClient(transport=transport, base_url="http://test") as second:
                     await first.get("/api/state")
                     await second.get("/api/state")
-                    result = await first.post(
+                    pending = (await first.post(
                         "/api/actions",
                         json={
                             "request_id": "00000000-0000-4000-8000-000000000902",
                             "text": "Send John Smith S$5 from savings.",
                         },
+                    )).json()
+                    choice = pending["receipt_choices"][0]
+                    device = SoftwareAuthenticator("http://test")
+                    consent = (await first.post("/api/kyc/myinfo")).json()
+                    await first.post("/api/face/register", json={"consent_id": consent["consent_id"], "frames": frames()})
+                    registration = (await first.post("/api/signing/registration-challenge")).json()
+                    await first.post(
+                        "/api/kyc/complete",
+                        json={
+                            "consent_id": consent["consent_id"],
+                            "challenge_id": registration["challenge_id"],
+                            "credential_kind": "WEBAUTHN_PLATFORM",
+                            "credential_id": device.credential_id,
+                            "public_key_spki": b64url_encode(device.public_key_spki),
+                            "algorithm": -7,
+                            "client_data_json": b64url_encode(
+                                device.client_data("webauthn.create", registration["challenge"])
+                            ),
+                            "authenticator_data": b64url_encode(device.authenticator_data()),
+                        },
+                    )
+                    digest = {"receipt_digest": choice["receipt_digest"]}
+                    # Visitor B can neither see nor be challenged for A's receipt.
+                    foreign = (await second.post(
+                        f"/api/receipts/{choice['receipt_id']}/challenge", json=digest
+                    )).json()
+                    challenge = (await first.post(
+                        f"/api/receipts/{choice['receipt_id']}/challenge", json=digest
+                    )).json()
+                    # Visitor B's session has no face registered and cannot confirm A's challenge.
+                    foreign_face = await second.post(
+                        "/api/face/verify", json={"challenge_id": challenge["challenge_id"], "frames": frames()}
+                    )
+                    assert foreign_face.status_code == 400, foreign_face.text
+                    face = await first.post(
+                        "/api/face/verify", json={"challenge_id": challenge["challenge_id"], "frames": frames()}
+                    )
+                    assert face.status_code == 200, face.text
+                    result = await first.post(
+                        f"/api/receipts/{choice['receipt_id']}/approve",
+                        json={
+                            **digest,
+                            "voice_confirmation": "yes, confirm",
+                            "assertion": SoftwareAuthenticator.wire(device.sign(challenge)),
+                        },
                     )
                     other = await second.get("/api/state")
-                    return result, other
+                    return result, other, foreign
 
-            result, other = asyncio.run(run())
+            result, other, foreign = asyncio.run(run())
+            self.assertEqual(foreign["reason_code"], "RECEIPT_NOT_FOUND")
             self.assertEqual(result.status_code, 200)
             self.assertEqual(result.json()["outcome"], "EXECUTED_SYNTHETIC_TRANSFER")
-            self.assertEqual(other.json()["accounts"][0]["balance_minor"], 100000)
+            self.assertEqual(other.json()["accounts"][0]["balance_minor"], 200000)
             self.assertFalse((Path(temp_dir.name) / "owner.sqlite3").exists())
         finally:
+            if "app" in locals():
+                app.state.session_manager.close()
             temp_dir.cleanup()
 
 

@@ -1,10 +1,12 @@
 import json
 import sqlite3
+from contextlib import closing
 import tempfile
 import unittest
 from pathlib import Path
 
-from apps.dimon_live.database import Database
+from apps.dimon_live.database import Database, ReceiptRejected
+from apps.dimon_live.tests.device_signer import SoftwareAuthenticator
 from apps.dimon_live.model_adapter import (
     ExtractedIntent,
     InvalidModelOutput,
@@ -14,6 +16,7 @@ from apps.dimon_live.model_adapter import (
 
 REQUEST_ID = "00000000-0000-4000-8000-000000000010"
 GOLDEN_REQUEST = "Send John Smith S$50 from savings."
+MODEL_ONLY_REQUEST = "I owe John Smith S$50, please settle it from savings."
 GOLDEN_INTENT = {
     "contract_version": 2,
     "kind": "BENEFICIARY_TRANSFER",
@@ -101,16 +104,70 @@ class RaisingExtractor:
 class ActionServiceTests(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
-        self.database = Database(Path(self.temp_dir.name) / "demo.sqlite3")
+        self.database = Database(Path(self.temp_dir.name) / "demo.sqlite3", single_account=True)
         self.database.initialize()
+        self.device = SoftwareAuthenticator()
+        self.device.enroll(self.database)
 
     def tearDown(self):
         self.temp_dir.cleanup()
+
+    def sign(self, choice):
+        challenge = self.database.issue_approval_challenge(
+            "single",
+            choice["receipt_id"],
+            choice["receipt_digest"],
+            rp_id=self.device.rp_id,
+        )
+        return self.device.sign(challenge)
+
+    def signed_approve(self, service, choice, *, assertion=None, user_id="demo_user_01", code=None):
+        return service.approve(
+            choice["receipt_id"],
+            choice["receipt_digest"],
+            assertion=assertion or self.sign(choice),
+            context=self.device.context,
+            out_of_band_code=code,
+            voice_confirmation="yes, confirm",
+            user_id=user_id,
+        )
+
+    def code_for(self, choice):
+        from apps.dimon_live.risk_policy import token_code
+
+        with closing(sqlite3.connect(self.database.path)) as connection:
+            secret = connection.execute("SELECT token_secret FROM customer_profiles").fetchone()[0]
+        return token_code(secret, choice["receipt_id"], choice["receipt_digest"])
 
     def service_for(self, intent):
         from apps.dimon_live.service import ActionService
 
         return ActionService(self.database, StaticExtractor(intent))
+
+    def test_social_phrases_never_become_payment_clarifications(self):
+        cases = {
+            "Thank you": "You're welcome. What else can I help with?",
+            "How was your day?": "I'm ready to help. What would you like to do?",
+            "You're welcome": "Thank you. What would you like help with?",
+        }
+        for index, (text, answer) in enumerate(cases.items(), 20):
+            with self.subTest(text=text):
+                result = self.service_for(GOLDEN_INTENT).process(
+                    f"00000000-0000-4000-8000-{index:012d}", text
+                )
+                self.assertEqual(result["outcome"], "ANSWERED")
+                self.assertEqual(result["reason_code"], "CONVERSATIONAL")
+                self.assertEqual(result["answer"], answer)
+
+    def test_cancel_without_pending_request_is_safe_and_explicit(self):
+        result = self.service_for(GOLDEN_INTENT).process(
+            "00000000-0000-4000-8000-000000000099", "Never mind"
+        )
+        self.assertEqual(result["outcome"], "ANSWERED")
+        self.assertEqual(
+            result["answer"],
+            "There isn't a pending request to cancel. Nothing was sent.",
+        )
 
     def balances(self):
         return [
@@ -118,11 +175,11 @@ class ActionServiceTests(unittest.TestCase):
         ]
 
     def receipt_count(self):
-        with sqlite3.connect(self.database.path) as connection:
+        with closing(sqlite3.connect(self.database.path)) as connection, connection:
             return connection.execute("SELECT COUNT(*) FROM review_receipts").fetchone()[0]
 
     def batch_receipt_count(self):
-        with sqlite3.connect(self.database.path) as connection:
+        with closing(sqlite3.connect(self.database.path)) as connection, connection:
             return connection.execute(
                 "SELECT COUNT(*) FROM batch_review_receipts"
             ).fetchone()[0]
@@ -302,10 +359,24 @@ class ActionServiceTests(unittest.TestCase):
         self.assertEqual(result["reason_code"], "AMBIGUOUS_AMOUNT")
         self.assertEqual(self.batch_receipt_count(), 0)
 
-    def test_exact_transfer_executes_and_returns_truthful_trace(self):
-        result = self.service_for(GOLDEN_INTENT).process(REQUEST_ID, GOLDEN_REQUEST)
+    def test_exact_transfer_needs_signature_then_returns_truthful_trace(self):
+        service = self.service_for(GOLDEN_INTENT)
+        pending = service.process(REQUEST_ID, GOLDEN_REQUEST)
+
+        # A fully specified command is still only a draft.
+        self.assertEqual(pending["outcome"], "CLARIFICATION_REQUEST")
+        stages = [step["stage"] for step in pending["trace"]]
+        self.assertEqual(
+            stages[-3:],
+            ["SIGNED_APPROVAL_REQUIRED", "VALIDATION_PASSED", "RISK_POLICY_PASSED"],
+        )
+        self.assertEqual(pending["receipt_choices"][0]["validation"]["verdict"], "PASS")
+        self.assertEqual(self.database.get_state()["transactions"], [])
+
+        result = self.signed_approve(service, pending["receipt_choices"][0])
 
         self.assertEqual(result["outcome"], "EXECUTED_SYNTHETIC_TRANSFER")
+        self.assertIn("DEVICE_SIGNATURE_VERIFIED", [step["stage"] for step in result["trace"]])
         self.assertEqual(
             result["resolved_action"]["source_account_id"], "acct_savings_01"
         )
@@ -322,7 +393,7 @@ class ActionServiceTests(unittest.TestCase):
             row["label"]: row["balance_minor"]
             for row in result["state"]["accounts"]
         }
-        self.assertEqual(balances["savings"], 95000)
+        self.assertEqual(balances["savings"], 195000)
         self.assertEqual(balances["John Smith"], 15000)
         self.assertEqual(balances["Alicia Powell"], 7500)
         self.assertEqual(balances["John Tan"], 7500)
@@ -360,10 +431,13 @@ class ActionServiceTests(unittest.TestCase):
             "amount_evidence": "10",
         }
 
-        result = self.service_for(wrong_model_amount).process(
+        service = self.service_for(wrong_model_amount)
+        pending = service.process(
             REQUEST_ID,
             "Send Alicia Powell $10",
         )
+        self.assertEqual(pending["receipt_choices"][0]["amount_minor"], 1000)
+        result = self.signed_approve(service, pending["receipt_choices"][0])
 
         self.assertEqual(result["outcome"], "EXECUTED_SYNTHETIC_TRANSFER")
         self.assertEqual(result["amount_minor"], 1000)
@@ -574,6 +648,35 @@ class ActionServiceTests(unittest.TestCase):
         self.assertEqual(self.balances(), before)
         self.assertEqual(self.database.get_state()["transactions"], [])
 
+    def test_spoken_paynow_digits_stay_one_request_and_override_model_recipient(self):
+        before = self.balances()
+        misclassified = {
+            **GOLDEN_INTENT,
+            "contract_version": 3,
+            "kind": "BENEFICIARY_TRANSFER",
+            "source_account_ref": None,
+            "source_evidence": None,
+            "recipient_label": "my friend",
+            "recipient_evidence": "my friend",
+            "amount_minor": 1000,
+            "amount_evidence": "ten dollars",
+        }
+        text = (
+            "so i just want to pay my friend um through his pay now i want to pay him "
+            "ten dollars eight seven six five four three two one"
+        )
+
+        result = self.service_for(misclassified).process(REQUEST_ID, text)
+
+        self.assertEqual(result["outcome"], "CLARIFICATION_REQUEST", result)
+        self.assertEqual(result["reason_code"], "PAYNOW_CONFIRMATION_REQUIRED")
+        self.assertEqual(result["validated_intent"]["mobile_proxy"], "87654321")
+        self.assertEqual(result["validated_intent"]["amount_minor"], 1000)
+        self.assertEqual(len(result["receipt_choices"]), 1)
+        self.assertEqual(result["receipt_choices"][0]["recipient_display_name"], "John Tan")
+        self.assertEqual(self.balances(), before)
+        self.assertEqual(self.database.get_state()["transactions"], [])
+
     def test_multiple_explicit_paynow_proxies_are_blocked_without_mutation(self):
         before = self.balances()
 
@@ -605,13 +708,55 @@ class ActionServiceTests(unittest.TestCase):
         self.assertEqual(receipt["destination_reference"], "86952933")
         self.assertTrue(receipt["lookup_reference"].startswith("lookup_"))
         self.assertEqual(self.balances(), before)
+        # A PayNow number never paid before is a new payee: token required.
+        self.assertTrue(choice["policy"]["requires_out_of_band"])
+        self.assertTrue(choice["payee"]["new_payee"])
 
-        executed = service.approve(choice["receipt_id"], choice["receipt_digest"])
-        replay = service.approve(choice["receipt_id"], choice["receipt_digest"])
+        assertion = self.sign(choice)
+        without_token = self.signed_approve(service, choice, assertion=assertion)
+        self.assertEqual(without_token["reason_code"], "OUT_OF_BAND_REQUIRED")
+        assertion = self.sign(choice)
+        executed = self.signed_approve(service, choice, assertion=assertion, code=self.code_for(choice))
+        replay = self.signed_approve(service, choice, assertion=assertion, code=self.code_for(choice))
 
         self.assertEqual(executed["outcome"], "EXECUTED_SYNTHETIC_TRANSFER")
         self.assertEqual(executed["transaction_id"], replay["transaction_id"])
         self.assertEqual(len(self.database.get_state()["transactions"]), 1)
+
+    def test_settled_paynow_recipient_can_be_saved_as_a_capped_new_payee(self):
+        from apps.dimon_live.payees import PayeeSaveRejected
+
+        service = self.service_for(PAYNOW_INTENT)
+        choice = service.process(REQUEST_ID, "PayNow 8695 2933 ten dollars for flowers")["receipt_choices"][0]
+        with self.assertRaises(PayeeSaveRejected) as unsettled:
+            self.database.save_payee(choice["receipt_id"], "Jay")
+        self.assertEqual(unsettled.exception.reason_code, "PAYNOW_RECEIPT_NOT_SETTLED")
+        self.signed_approve(service, choice, assertion=self.sign(choice), code=self.code_for(choice))
+
+        for nickname, reason in (("Alicia Powell", "NICKNAME_IN_USE"), ("mum", "NICKNAME_IN_USE"), ("J4y!", "INVALID_NICKNAME")):
+            with self.assertRaises(PayeeSaveRejected) as rejected:
+                self.database.save_payee(choice["receipt_id"], nickname)
+            self.assertEqual(rejected.exception.reason_code, reason)
+        saved = self.database.save_payee(choice["receipt_id"], "Jay")
+        self.assertEqual(saved["masked_destination"], "PayNow •••• 2933")
+        with self.assertRaises(PayeeSaveRejected) as twice:
+            self.database.save_payee(choice["receipt_id"], "Jay Two")
+        self.assertEqual(twice.exception.reason_code, "PAYEE_ALREADY_SAVED")
+
+        intent = {
+            **GOLDEN_INTENT, "recipient_label": "Jay", "recipient_evidence": "Jay",
+            "source_account_ref": None, "source_evidence": None,
+        }
+        within = self.service_for(intent).process(
+            "00000000-0000-4000-8000-000000000091", "Send Jay S$20"
+        )["receipt_choices"][0]
+        self.assertEqual(within["recipient_display_name"], "Jay")
+        self.assertTrue(within["payee"]["new_payee"])
+        self.assertTrue(within["policy"]["requires_out_of_band"])
+        over_cap = self.service_for(intent).process(
+            "00000000-0000-4000-8000-000000000092", "Send Jay S$150"
+        )
+        self.assertEqual(over_cap["reason_code"], "NEW_PAYEE_LIMIT_EXCEEDED")
 
     def test_missing_amount_paynow_reuses_lookup_without_second_model_call(self):
         from apps.dimon_live.service import ActionService
@@ -654,7 +799,8 @@ class ActionServiceTests(unittest.TestCase):
                     "PayNow 8695 2933 ten dollars for flowers",
                 )
                 choice = pending["receipt_choices"][0]
-                with sqlite3.connect(self.database.path) as connection:
+                assertion = self.sign(choice)
+                with closing(sqlite3.connect(self.database.path)) as connection, connection:
                     if receipt_change:
                         connection.execute(
                             f"UPDATE review_receipts SET {receipt_change} WHERE receipt_id = ?",
@@ -666,10 +812,7 @@ class ActionServiceTests(unittest.TestCase):
                             (choice["lookup_reference"],),
                         )
 
-                result = service.approve(
-                    choice["receipt_id"],
-                    choice["receipt_digest"],
-                )
+                result = self.signed_approve(service, choice, assertion=assertion)
 
                 self.assertEqual(result["outcome"], "BLOCKED")
                 self.assertEqual(self.database.get_state()["transactions"], [])
@@ -681,8 +824,9 @@ class ActionServiceTests(unittest.TestCase):
             "PayNow 8695 2933 ten dollars for flowers",
         )
         choice = pending["receipt_choices"][0]
+        assertion = self.sign(choice)
         before = self.balances()
-        with sqlite3.connect(self.database.path) as connection:
+        with closing(sqlite3.connect(self.database.path)) as connection, connection:
             connection.execute(
                 """
                 UPDATE beneficiaries SET destination_account_id = ?
@@ -691,7 +835,7 @@ class ActionServiceTests(unittest.TestCase):
                 ("acct_alicia_powell_01",),
             )
 
-        result = service.approve(choice["receipt_id"], choice["receipt_digest"])
+        result = self.signed_approve(service, choice, assertion=assertion)
 
         self.assertEqual(result["outcome"], "BLOCKED")
         self.assertEqual(result["reason_code"], "PAYNOW_LOOKUP_MISMATCH")
@@ -705,7 +849,7 @@ class ActionServiceTests(unittest.TestCase):
             REQUEST_ID,
             "PayNow 8695 2933 for flowers",
         )
-        with sqlite3.connect(self.database.path) as connection:
+        with closing(sqlite3.connect(self.database.path)) as connection, connection:
             connection.execute(
                 "UPDATE paynow_lookups SET expires_at = '2020-01-01T00:00:00+00:00'"
             )
@@ -777,13 +921,36 @@ class ActionServiceTests(unittest.TestCase):
 
         self.assertEqual(result["outcome"], "CLARIFICATION_REQUEST")
         self.assertEqual(result["reason_code"], "CLOSE_RECIPIENT_MATCH")
-        self.assertEqual(result["question"], "Did you mean Alicia Powell?")
+        self.assertEqual(result["question"], "Did you mean Alicia Powell ending in 9876 (paid S$12 3 days ago)?")
         self.assertEqual(
             result["receipt_choices"][0]["recipient_display_name"],
             "Alicia Powell",
         )
+        self.assertEqual(result["receipt_choices"][0]["masked_destination"], "•••• 9876")
         self.assertEqual(result["receipt_choices"][0]["amount_minor"], 250)
         self.assertEqual(self.balances(), before)
+
+    def test_same_named_payees_are_told_apart_by_account_ending(self):
+        intent = {
+            **GOLDEN_INTENT,
+            "recipient_label": "John",
+            "recipient_evidence": "John",
+            "amount_minor": 500,
+            "amount_evidence": "five dollars",
+            "source_account_ref": None,
+            "source_evidence": None,
+        }
+
+        result = self.service_for(intent).process(REQUEST_ID, "Send John five dollars")
+
+        self.assertEqual(result["reason_code"], "AMBIGUOUS_RECIPIENT")
+        self.assertEqual(
+            result["question"],
+            "I see 2 saved payees named John. "
+            "Did you mean John Smith ending in 4321 (paid S$20 6 days ago) "
+            "or John Tan ending in 2468 (last paid 6 months ago)?",
+        )
+        self.assertEqual(self.database.get_state()["transactions"], [])
 
     def test_misspelled_first_name_requires_receipt_confirmation(self):
         before = self.balances()
@@ -849,22 +1016,24 @@ class ActionServiceTests(unittest.TestCase):
             "amount_evidence": "five dollars",
         }
 
-        result = self.service_for(intent).process(
+        service = self.service_for(intent)
+        pending = service.process(
             REQUEST_ID,
             "Send Alicia Powell five dollars.",
         )
+        self.assertIn("SOURCE_DEFAULTED", [step["stage"] for step in pending["trace"]])
+        result = self.signed_approve(service, pending["receipt_choices"][0])
 
         self.assertEqual(result["outcome"], "EXECUTED_SYNTHETIC_TRANSFER")
         self.assertEqual(
             result["resolved_action"]["source_account_id"],
             "acct_savings_01",
         )
-        self.assertIn("SOURCE_DEFAULTED", [step["stage"] for step in result["trace"]])
         balances = {
             row["label"]: row["balance_minor"]
             for row in result["state"]["accounts"]
         }
-        self.assertEqual(balances["savings"], 99500)
+        self.assertEqual(balances["savings"], 199500)
         self.assertEqual(balances["Alicia Powell"], 8000)
 
     def test_vague_debt_statement_requires_confirmation_without_mutation(self):
@@ -922,10 +1091,7 @@ class ActionServiceTests(unittest.TestCase):
         )
         choice = clarification["receipt_choices"][0]
 
-        executed = service.approve(
-            choice["receipt_id"],
-            choice["receipt_digest"],
-        )
+        executed = self.signed_approve(service, choice)
 
         self.assertEqual(extractor.calls, [text])
         self.assertEqual(executed["outcome"], "EXECUTED_SYNTHETIC_TRANSFER")
@@ -955,7 +1121,7 @@ class ActionServiceTests(unittest.TestCase):
         pending = service.process(REQUEST_ID, text)
         pending_replay = service.process(REQUEST_ID, text)
         choice = pending["receipt_choices"][0]
-        executed = service.approve(choice["receipt_id"], choice["receipt_digest"])
+        executed = self.signed_approve(service, choice)
         executed_replay = service.process(REQUEST_ID, text)
 
         self.assertEqual(
@@ -989,23 +1155,39 @@ class ActionServiceTests(unittest.TestCase):
         choice = pending["receipt_choices"][0]
 
         cases = (
-            ("receipt_missing", "0" * 64, "demo_user_01", "RECEIPT_NOT_FOUND"),
+            ("receipt_missing", "0" * 64, "demo_user_01", False, "RECEIPT_NOT_FOUND"),
+            (
+                choice["receipt_id"],
+                choice["receipt_digest"],
+                "demo_user_01",
+                False,
+                "SIGNED_APPROVAL_REQUIRED",
+            ),
             (
                 choice["receipt_id"],
                 "0" * 64,
                 "demo_user_01",
-                "RECEIPT_DIGEST_MISMATCH",
+                True,
+                "APPROVAL_RECEIPT_MISMATCH",
             ),
             (
                 choice["receipt_id"],
                 choice["receipt_digest"],
                 "other_user",
-                "RECEIPT_USER_MISMATCH",
+                True,
+                "APPROVAL_USER_MISMATCH",
             ),
         )
-        for receipt_id, digest, user_id, expected in cases:
+        for receipt_id, digest, user_id, signed, expected in cases:
             with self.subTest(reason=expected):
-                result = service.approve(receipt_id, digest, user_id=user_id)
+                result = service.approve(
+                    receipt_id,
+                    digest,
+                    assertion=self.sign(choice) if signed else None,
+                    context=self.device.context,
+                    voice_confirmation="yes, confirm",
+                    user_id=user_id,
+                )
                 self.assertEqual(
                     (result["outcome"], result["reason_code"]),
                     ("BLOCKED", expected),
@@ -1027,14 +1209,19 @@ class ActionServiceTests(unittest.TestCase):
         john_service = ActionService(self.database, RecordingExtractor(john_intent))
         pending = john_service.process(REQUEST_ID, "Send John five dollars")
         selected, sibling = pending["receipt_choices"]
-        john_service.approve(selected["receipt_id"], selected["receipt_digest"])
+        stale_sibling_assertion = self.sign(sibling)
+        self.signed_approve(john_service, selected)
 
-        superseded = john_service.approve(
-            sibling["receipt_id"],
-            sibling["receipt_digest"],
+        # A superseded receipt can no longer be put in front of the user...
+        with self.assertRaisesRegex(ReceiptRejected, "RECEIPT_SUPERSEDED"):
+            self.sign(sibling)
+        # ...and a signature captured before the newer approval is stale.
+        superseded = self.signed_approve(
+            john_service, sibling, assertion=stale_sibling_assertion
         )
 
-        self.assertEqual(superseded["reason_code"], "RECEIPT_SUPERSEDED")
+        self.assertEqual(superseded["reason_code"], "APPROVAL_COUNTER_REPLAY")
+        self.assertEqual(len(self.database.get_state()["transactions"]), 1)
         self.database.reset()
 
         vague_intent = {
@@ -1055,7 +1242,8 @@ class ActionServiceTests(unittest.TestCase):
             "I owe Alicia Powell 5 dollars, help me resolve it.",
         )
         choice = pending["receipt_choices"][0]
-        with sqlite3.connect(self.database.path) as connection:
+        assertion = self.sign(choice)
+        with closing(sqlite3.connect(self.database.path)) as connection, connection:
             connection.execute(
                 """
                 UPDATE review_receipts SET status = 'EXPIRED'
@@ -1064,10 +1252,7 @@ class ActionServiceTests(unittest.TestCase):
                 (choice["receipt_id"],),
             )
 
-        expired = vague_service.approve(
-            choice["receipt_id"],
-            choice["receipt_digest"],
-        )
+        expired = self.signed_approve(vague_service, choice, assertion=assertion)
 
         self.assertEqual(expired["reason_code"], "RECEIPT_EXPIRED")
         self.assertEqual(len(self.database.get_state()["transactions"]), 0)
@@ -1077,19 +1262,19 @@ class ActionServiceTests(unittest.TestCase):
             **GOLDEN_INTENT,
             "recipient_label": "John",
             "recipient_evidence": "John",
-            "amount_minor": 100001,
-            "amount_evidence": "S$1,000.01",
+            "amount_minor": 200001,
+            "amount_evidence": "S$2,000.01",
             "source_account_ref": None,
             "source_evidence": None,
         }
 
         result = self.service_for(intent).process(
             REQUEST_ID,
-            "Send John S$1,000.01",
+            "Send John S$2,000.01",
         )
 
         self.assertEqual(result["reason_code"], "INSUFFICIENT_FUNDS")
-        with sqlite3.connect(self.database.path) as connection:
+        with closing(sqlite3.connect(self.database.path)) as connection, connection:
             receipt_count = connection.execute(
                 "SELECT COUNT(*) FROM review_receipts"
             ).fetchone()[0]
@@ -1116,10 +1301,10 @@ class ActionServiceTests(unittest.TestCase):
                 **GOLDEN_INTENT,
                 "source_account_ref": None,
                 "source_evidence": None,
-                "amount_minor": 100001,
-                "amount_evidence": "S$1,000.01",
+                "amount_minor": 200001,
+                "amount_evidence": "S$2,000.01",
             }
-        ).process(REQUEST_ID, "Send John Smith S$1,000.01")
+        ).process(REQUEST_ID, "Send John Smith S$2,000.01")
 
         self.assertEqual(
             (result["outcome"], result["reason_code"]),
@@ -1152,7 +1337,8 @@ class ActionServiceTests(unittest.TestCase):
             RaisingExtractor(InvalidModelOutput("bad JSON")),
         )
 
-        result = service.process(REQUEST_ID, GOLDEN_REQUEST)
+        # Phrased so the plain-transfer rules leave it to the model.
+        result = service.process(REQUEST_ID, MODEL_ONLY_REQUEST)
 
         self.assertEqual(
             (result["outcome"], result["reason_code"]),
@@ -1169,7 +1355,8 @@ class ActionServiceTests(unittest.TestCase):
             RaisingExtractor(ModelUnavailable("timeout")),
         )
 
-        result = service.process(REQUEST_ID, GOLDEN_REQUEST)
+        # Phrased so the plain-transfer rules leave it to the model.
+        result = service.process(REQUEST_ID, MODEL_ONLY_REQUEST)
 
         self.assertEqual(
             (result["outcome"], result["reason_code"]),
@@ -1180,7 +1367,9 @@ class ActionServiceTests(unittest.TestCase):
     def test_idempotent_replay_does_not_call_model_or_debit_again(self):
         from apps.dimon_live.service import ActionService
 
-        first = self.service_for(GOLDEN_INTENT).process(REQUEST_ID, GOLDEN_REQUEST)
+        service = self.service_for(GOLDEN_INTENT)
+        pending = service.process(REQUEST_ID, GOLDEN_REQUEST)
+        first = self.signed_approve(service, pending["receipt_choices"][0])
         replay_service = ActionService(
             self.database,
             RaisingExtractor(AssertionError("model must not be called")),
@@ -1193,9 +1382,45 @@ class ActionServiceTests(unittest.TestCase):
             replay["resolved_action"]["destination_account_id"],
             "acct_john_smith_01",
         )
-        self.assertTrue(replay["idempotent_replay"])
-        self.assertEqual(self.balances()[0], 95000)
+        self.assertEqual(self.balances()[0], 195000)
         self.assertEqual(len(self.database.get_state()["transactions"]), 1)
+
+    def test_synthetic_catalog_precedes_real_stock_rules(self):
+        from apps.dimon_live.service import ActionService
+
+        forbidden = RaisingExtractor(AssertionError("real-stock model must not run"))
+        service = ActionService(
+            self.database,
+            forbidden,
+            stock_extractor=forbidden,
+        )
+
+        result = service.process(REQUEST_ID, "Buy 2 shares of Merlion Bank Holdings")
+
+        self.assertEqual(
+            (result["outcome"], result["reason_code"]),
+            ("CLARIFICATION_REQUEST", "INVESTOR_PROFILE_REQUIRED"),
+        )
+
+    def test_rule_stock_sell_precedes_buy_only_model(self):
+        from apps.dimon_live.service import ActionService
+        from apps.dimon_live.tests.test_stock_market import NOW, NvidiaMarketProvider
+
+        forbidden = RaisingExtractor(AssertionError("buy-only model must not run"))
+        service = ActionService(
+            self.database,
+            forbidden,
+            stock_extractor=forbidden,
+            stock_provider=NvidiaMarketProvider(),
+        )
+        self.database._clock = lambda: NOW
+
+        result = service.process(REQUEST_ID, "Sell 2 NVIDIA shares")
+
+        self.assertEqual(
+            (result["outcome"], result["reason_code"]),
+            ("ANSWERED", "NOT_HELD"),
+        )
 
 
 if __name__ == "__main__":

@@ -1,6 +1,6 @@
 # GPU host setup
 
-The GPU host has two modes. `shared` reuses compatible Qwen, Nemotron, and Kokoro processes already listening on the three loopback ports and starts only Dimon's inference gateway. `standalone` starts repository-owned processes while referencing the same external artifact files. Neither mode copies weights.
+The GPU host has two modes. `shared` reuses compatible Qwen, Nemotron, and Kokoro processes already listening on the three loopback ports and starts only Dimon's inference gateway. When Nemotron is managed on demand, configure `DIMON_NEMOTRON_CONTROL_SOCKET` so transcription acquires and releases the existing supervisor. `standalone` starts repository-owned processes while referencing the same external artifact files. Neither mode copies weights.
 
 ## First run
 
@@ -12,7 +12,11 @@ cp .env.example .env.host
 cp config/models.example.yaml config/models.yaml
 ```
 
-Set the artifact and runtime path variables in `.env.host`. Set `DIMON_QWEN_REVISION`, `DIMON_NEMOTRON_REVISION`, and `DIMON_KOKORO_REVISION` to the immutable revisions in `config/models.example.yaml`. Add the Cloudflare Access audience and issuer required by the gateway. Restrict the file with `chmod 600 .env.host`.
+Set the artifact and runtime path variables in `.env.host`. Set `DIMON_QWEN_REVISION`, `DIMON_NEMOTRON_REVISION`, and `DIMON_KOKORO_REVISION` to the immutable revisions in `config/models.example.yaml`. Set `DIMON_INFERENCE_SERVICE_KEY` to a rotated value distributed out of band to authorized teammates. Restrict the host file with `chmod 600 .env.host`.
+
+The Cloudflare Tunnel hostname `tencentservices.stocksuite.app` should target
+`http://127.0.0.1:8891`. Only the gateway is published; model services remain
+on their private loopback ports.
 
 Normal setup does not download anything:
 

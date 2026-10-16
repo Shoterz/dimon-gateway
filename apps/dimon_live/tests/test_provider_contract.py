@@ -199,11 +199,13 @@ class LocalFakeLifecycle:
     def __init__(self, unavailable: bool = False):
         self.unavailable = unavailable
 
-    async def acquire(self) -> dict[str, object]:
+    async def acquire(self):
         if self.unavailable:
             raise InferenceFailure("UPSTREAM_UNAVAILABLE", "fake local voice unavailable")
-        return {"ok": True}
+        return LocalFakeLifecycleLease()
 
+
+class LocalFakeLifecycleLease:
     async def release(self, *, disconnected: bool = False) -> None:
         del disconnected
 
@@ -254,8 +256,7 @@ class RemoteProviderContractTests(ProviderContractMixin, unittest.TestCase):
         remote_config = RemoteGatewayConfig.from_env(
             {
                 "DIMON_INFERENCE_GATEWAY_URL": "https://gateway.example.test",
-                "DIMON_CF_ACCESS_CLIENT_ID": "client-id",
-                "DIMON_CF_ACCESS_CLIENT_SECRET": "client-secret",
+                "DIMON_INFERENCE_SERVICE_KEY": "shared-test-key-0123456789abcdef",
             }
         )
 

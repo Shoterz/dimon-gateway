@@ -1,0 +1,43 @@
+{
+  "gpu_index": 0,
+  "safety_reserve_mb": 512,
+  "admission_wait_seconds": 600,
+  "heartbeat_seconds": 2,
+  "heartbeat_timeout_seconds": 10,
+  "vram_release_timeout_seconds": 30,
+  "profiles_mb": {
+    "kokoro": {
+      "kokoro-82m": 1280
+    },
+    "whisper": {
+      "whisper-turbo": 6144
+    },
+    "whisper_llama": {
+      "whisper-small": 3072
+    },
+    "nemotron": {
+      "nemotron-en": 1536
+    },
+    "faster_whisper": {
+      "faster-whisper-medium-cuda": 1664
+    },
+    "llama": {
+      "deepseek-r1-14b": 9216,
+      "gemma4-12b": 9216,
+      "gemma4-e4b-heretic": 9216,
+      "gemma4-multimodal-12b": 10240,
+      "qwen25-vl-7b": 8192,
+      "qwen3-8b": 8192,
+      "qwen3-8b-16k": 7680,
+      "qwen3-8b-32k": 8192,
+      "qwen3-8b-coding": 9216,
+      "qwen35-9b-abliterated-q5": 8192,
+      "qwen35-9b-abliterated-q5-4k": 6528,
+      "qwen35-9b-abliterated-q5-8k": 7168,
+      "qwen35-9b-abliterated-q5-16k": 7168,
+      "qwen35-9b-abliterated-q5-32k": 7168,
+      "ornith": 9216,
+      "supra-50m-instruct": 1024
+    }
+  }
+}

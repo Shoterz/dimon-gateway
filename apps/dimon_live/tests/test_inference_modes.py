@@ -13,6 +13,7 @@ from apps.dimon_live.provider_factory import (
     build_inference_providers,
 )
 from apps.dimon_live.service import ActionService
+from apps.dimon_live.app import _wake_recognizer
 
 
 class StubExtractor:
@@ -41,6 +42,12 @@ async def stub_synthesizer(text: str) -> bytes:
 
 
 class InferenceModeTests(unittest.TestCase):
+    def test_remote_mode_uses_direct_faster_whisper_for_wake_detection(self) -> None:
+        wake = _wake_recognizer("whisper_cpp", "remote")
+
+        self.assertEqual(wake["wake_recognizer"].url, "ws://127.0.0.1:8003/ws")
+        self.assertEqual(type(wake["wake_recognizer"]).__name__, "FasterWhisperClient")
+
     def test_parse_accepts_the_three_public_modes(self) -> None:
         self.assertEqual(
             [parse_inference_mode(value) for value in ("fixture", "remote", "local")],
@@ -58,8 +65,14 @@ class InferenceModeTests(unittest.TestCase):
 
         self.assertEqual(providers.mode, "local")
         self.assertEqual(providers.extractor.api_base, "http://127.0.0.1:8080/v1")
-        self.assertEqual(providers.recognizer.url, "ws://127.0.0.1:8004/v1/realtime")
+        self.assertEqual(providers.recognizer.url, "ws://127.0.0.1:8006/v1/stream")
+        self.assertIsNone(providers.voice_lifecycle)
         self.assertEqual(providers.synthesizer.base_url, "http://127.0.0.1:3001")
+        self.assertIsNotNone(providers.bill_payment_extractor)
+        self.assertEqual(
+            providers.bill_payment_extractor.api_base,
+            "http://127.0.0.1:8080/v1",
+        )
 
     def test_local_factory_rejects_an_explicitly_empty_endpoint(self) -> None:
         with self.assertRaises(ProviderConfigurationError) as raised:
@@ -67,7 +80,63 @@ class InferenceModeTests(unittest.TestCase):
 
         self.assertEqual(raised.exception.reason_code, "INVALID_LOCAL_INFERENCE_CONFIG")
 
-    def test_remote_factory_requires_service_token_configuration(self) -> None:
+    def test_local_factory_builds_whisper_intel_backend_when_selected(self) -> None:
+        providers = build_inference_providers(
+            "local",
+            {"DIMON_STT_BACKEND": "whisper_intel"},
+        )
+
+        self.assertEqual(providers.mode, "local")
+        self.assertEqual(providers.recognizer.url, "ws://127.0.0.1:8005/v1/stream")
+        self.assertIsNone(providers.voice_lifecycle)
+
+    def test_local_factory_builds_whisper_cpp_backend_when_selected(self) -> None:
+        providers = build_inference_providers(
+            "local",
+            {"DIMON_STT_BACKEND": "whisper_cpp"},
+        )
+
+        self.assertEqual(providers.mode, "local")
+        self.assertEqual(providers.recognizer.url, "ws://127.0.0.1:8006/v1/stream")
+        self.assertIsNone(providers.voice_lifecycle)
+
+    def test_local_factory_whisper_cpp_result_timeout_is_env_configurable(self) -> None:
+        providers = build_inference_providers(
+            "local",
+            {"DIMON_STT_BACKEND": "whisper_cpp", "DIMON_WHISPER_CPP_RESULT_TIMEOUT": "120"},
+        )
+
+        self.assertEqual(providers.recognizer.result_timeout, 120.0)
+
+    def test_local_factory_whisper_cpp_result_timeout_default_is_ninety(self) -> None:
+        providers = build_inference_providers(
+            "local",
+            {"DIMON_STT_BACKEND": "whisper_cpp"},
+        )
+
+        self.assertEqual(providers.recognizer.result_timeout, 90.0)
+
+    def test_local_factory_whisper_intel_result_timeout_default_is_thirty(self) -> None:
+        providers = build_inference_providers(
+            "local",
+            {"DIMON_STT_BACKEND": "whisper_intel"},
+        )
+
+        self.assertEqual(providers.recognizer.result_timeout, 30.0)
+
+    def test_local_factory_rejects_an_unknown_stt_backend(self) -> None:
+        with self.assertRaises(ProviderConfigurationError) as raised:
+            build_inference_providers("local", {"DIMON_STT_BACKEND": "openai"})
+
+        self.assertEqual(raised.exception.reason_code, "INVALID_LOCAL_INFERENCE_CONFIG")
+
+    def test_local_factory_defaults_to_whisper_cpp(self) -> None:
+        providers = build_inference_providers("local", {})
+
+        self.assertEqual(providers.recognizer.url, "ws://127.0.0.1:8006/v1/stream")
+        self.assertIsNone(providers.voice_lifecycle)
+
+    def test_remote_factory_requires_shared_service_key(self) -> None:
         with self.assertRaises(ProviderConfigurationError) as raised:
             build_inference_providers("remote", {})
         self.assertEqual(raised.exception.reason_code, "INVALID_REMOTE_INFERENCE_CONFIG")
@@ -77,8 +146,7 @@ class InferenceModeTests(unittest.TestCase):
             "remote",
             {
                 "DIMON_INFERENCE_GATEWAY_URL": "https://gateway.example.test",
-                "DIMON_CF_ACCESS_CLIENT_ID": "client-id",
-                "DIMON_CF_ACCESS_CLIENT_SECRET": "client-secret",
+                "DIMON_INFERENCE_SERVICE_KEY": "shared-test-key-0123456789abcdef",
             },
         )
 

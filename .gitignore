@@ -1,6 +1,9 @@
 .superpowers/
 .kilo/
 .worktrees/
+submission/private/
+/tmp/
+/friend-frontend-dbs-ui/
 
 # Active environments and credentials
 .env
@@ -16,6 +19,7 @@
 # Python environments, caches, and build output
 .venv/
 venv/
+/.runtime/
 __pycache__/
 *.pyc
 *.pyo
@@ -34,6 +38,8 @@ apps/dimon_live/data/*.sqlite
 apps/dimon_live/data/*.sqlite3
 apps/dimon_live/data/*.db
 *.wav
+!apps/dimon_live/static/audio/wake-greeting-v1.wav
+!apps/dimon_live/static/audio/voice-enrollment-confirmation-v1.wav
 *.mp3
 *.flac
 *.ogg

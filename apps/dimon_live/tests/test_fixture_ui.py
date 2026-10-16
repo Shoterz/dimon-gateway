@@ -78,8 +78,25 @@ class FixtureSessionUiTests(unittest.TestCase):
 
         self.assertIn('id="inference-mode-badge"', html)
         self.assertIn("Fixture inference", html)
+        self.assertIn("Synthetic demo", html)
+        self.assertEqual(html.count("Synthetic demo · no real money"), 5)
+        self.assertNotIn('aria-label="Notifications"', html)
+        for dialog_id in ("kyc-dialog", "singpass-dialog", "profile-dialog", "approval-dialog"):
+            dialog = html[html.index(f'id="{dialog_id}"'):]
+            self.assertIn('class="approval-synthetic-marker"', dialog[:dialog.index("</dialog>")])
+        evidence_start = html.index('id="evidence-view"')
+        self.assertGreater(html.index('id="inference-mode-badge"'), evidence_start)
         self.assertIn('fetch("/api/session")', script)
         self.assertIn('session.inference_mode === "fixture"', script)
+
+    def test_evidence_view_follows_deterministic_lifecycle_order(self) -> None:
+        html = self.request("/").text
+        labels = ["Validation", "Approval receipt", "Settlement", "Exactly-once status", "Decision trace"]
+        positions = [html.index(label) for label in labels]
+        self.assertEqual(positions, sorted(positions))
+        self.assertIn("Proposed", html)
+        self.assertIn("Already settled", html)
+        self.assertIn("No second execution", html)
 
     def test_configured_localhost_port_accepts_navigation_without_origin(self) -> None:
         from apps.dimon_live.app import create_app
@@ -102,6 +119,30 @@ class FixtureSessionUiTests(unittest.TestCase):
                 return await client.get("/api/session")
 
         self.assertEqual(asyncio.run(send()).status_code, 200)
+        app.state.session_manager.close()
+
+    def test_configured_localhost_port_serves_the_page_without_origin(self) -> None:
+        from apps.dimon_live.app import create_app
+
+        root = Path(self.temp_dir.name) / "page-boundary"
+        settings = {
+            "DIMON_ALLOWED_ORIGINS": "http://127.0.0.1:18990",
+            "DIMON_DB_OWNER_PATH": str(root / "owner.sqlite3"),
+            "DIMON_VISITOR_DB_DIR": str(root / "visitors"),
+        }
+        with patch.dict(os.environ, settings):
+            app = create_app(providers=build_inference_providers("fixture", {}))
+
+        async def send() -> httpx.Response:
+            transport = httpx.ASGITransport(app=app)
+            async with httpx.AsyncClient(
+                transport=transport,
+                base_url="http://127.0.0.1:18990",
+            ) as client:
+                return await client.get("/")
+
+        self.assertEqual(asyncio.run(send()).status_code, 200)
+        app.state.session_manager.close()
 
 
 if __name__ == "__main__":

@@ -1,10 +1,18 @@
-import asyncio
+import base64
 import json
+import posixpath
+import re
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import httpx
+
+from apps.dimon_live.approval_gateway import b64url_encode
+from apps.dimon_live.tests.async_helpers import run_async_test
+from apps.dimon_live.tests.device_signer import SoftwareAuthenticator
+from apps.dimon_live.tests.face_fake import FakeFaceEngine, live_frames
 
 from apps.dimon_live.model_adapter import ExtractedIntent
 
@@ -53,6 +61,10 @@ class RecordingExtractor:
         )
 
 
+def face_frames(person="account-holder", **options):
+    return [base64.b64encode(frame).decode() for frame in live_frames(person, **options)]
+
+
 class DimonLiveApiTests(unittest.TestCase):
     def setUp(self):
         from apps.dimon_live.app import create_app
@@ -62,7 +74,12 @@ class DimonLiveApiTests(unittest.TestCase):
         self.app = create_app(
             Path(self.temp_dir.name) / "demo.sqlite3",
             extractor=self.extractor,
+            face_engine=FakeFaceEngine(),
         )
+        # One-account ledger; two accounts are covered in test_multi_intent.py.
+        database = self.app.state.database
+        database.single_account = True
+        database.reset()
 
     def tearDown(self):
         self.temp_dir.cleanup()
@@ -76,7 +93,208 @@ class DimonLiveApiTests(unittest.TestCase):
             ) as client:
                 return await client.request(method, path, **kwargs)
 
-        return asyncio.run(send())
+        return run_async_test(send)
+
+    def test_voice_diagnostics_route_is_read_only_and_not_cacheable(self):
+        response = self.request("GET", "/api/voice/diagnostics/latest")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.headers["cache-control"], "no-store")
+        self.assertEqual(set(response.json()), {"trace", "workers", "gpu"})
+
+    def test_hands_free_speech_prompts_are_bounded_and_session_owned(self):
+        class RecordingSpeechService:
+            def __init__(self):
+                self.calls = []
+
+            def queue_text(self, text, context):
+                self.calls.append((text, context.session_id))
+                return "prompt_audio_1"
+
+        speech = RecordingSpeechService()
+        self.app.state.speech_service = speech
+
+        accepted = self.request(
+            "POST",
+            "/api/speech/prompts",
+            json={"prompt_key": "multi_requests", "values": {"count": 2}},
+        )
+
+        self.assertEqual(accepted.status_code, 200)
+        self.assertEqual(accepted.json(), {"audio_artifact_id": "prompt_audio_1"})
+        self.assertEqual(speech.calls[0][0], "I heard 2 requests. Let's go through them.")
+        self.assertTrue(speech.calls[0][1])
+
+        unknown = self.request(
+            "POST",
+            "/api/speech/prompts",
+            json={"prompt_key": "speak_anything", "values": {}},
+        )
+        unexpected_value = self.request(
+            "POST",
+            "/api/speech/prompts",
+            json={"prompt_key": "done", "values": {"text": "read my arbitrary prose"}},
+        )
+        wrong_type = self.request(
+            "POST",
+            "/api/speech/prompts",
+            json={"prompt_key": "multi_requests", "values": {"count": "2"}},
+        )
+        arbitrary_text = self.request(
+            "POST",
+            "/api/speech/prompts",
+            json={"prompt_key": "done", "values": {}, "text": "read my arbitrary prose"},
+        )
+
+        self.assertEqual(unknown.status_code, 400)
+        self.assertEqual(unexpected_value.status_code, 400)
+        self.assertEqual(wrong_type.status_code, 400)
+        self.assertEqual(arbitrary_text.status_code, 422)
+        self.assertEqual(len(speech.calls), 1)
+
+    def test_multi_action_response_attaches_safe_speech_to_each_child(self):
+        from apps.dimon_live.speech import result_summary
+
+        class RecordingSpeechService:
+            def __init__(self):
+                self.summaries = []
+
+            def queue_result(self, result, _context):
+                summary = result_summary(result)
+                if summary is None:
+                    return None
+                self.summaries.append(summary)
+                return f"audio-{len(self.summaries)}"
+
+        stock_answer = (
+            "NVDA is US$221.30. Nasdaq is currently in pre-market. "
+            "A market order would wait until the open. Buy at market when "
+            "Nasdaq opens, or set a maximum price?"
+        )
+        planned = {
+            "outcome": "MULTI_ACTION_CONFIRMATION_REQUEST",
+            "request_id": REQUEST_ID,
+            "items": [
+                {
+                    "kind": "STOCK_INVESTMENT",
+                    "evidence": "buy one NVIDIA share",
+                    "result": {
+                        "outcome": "ANSWERED",
+                        "reason_code": "REAL_STOCK_BRIEF",
+                        "answer": stock_answer,
+                        "question": "Buy at market when Nasdaq opens, or set a maximum price?",
+                        "conversation": {
+                            "conversation_id": "stock-conversation-1",
+                            "status": "WAITING",
+                            "version": 1,
+                        },
+                    },
+                },
+                {
+                    "kind": "BILL_PAYMENT",
+                    "evidence": "pay my water bill",
+                    "result": {
+                        "outcome": "CLARIFICATION_REQUEST",
+                        "reason_code": "BILL_PAYMENT_CONFIRMATION_REQUIRED",
+                        "receipt_choices": [{
+                            "recipient_display_name": "PUB Water",
+                            "source_label": "savings",
+                            "amount_minor": 7780,
+                            "currency": "SGD",
+                        }],
+                    },
+                },
+            ],
+        }
+        speech = RecordingSpeechService()
+        self.app.state.speech_service = speech
+
+        with patch(
+            "apps.dimon_live.app.ActionService.process", return_value=planned
+        ):
+            response = self.request(
+                "POST",
+                "/api/actions",
+                json={"request_id": REQUEST_ID, "text": "buy NVIDIA and pay water"},
+            )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = response.json()
+        self.assertNotIn("audio_artifact_id", payload)
+        self.assertTrue(all(
+            "audio_artifact_id" in item["result"] for item in payload["items"]
+        ))
+        self.assertEqual(len(speech.summaries), 2)
+        self.assertIn(stock_answer, speech.summaries)
+        self.assertTrue(any("PUB Water" in summary for summary in speech.summaries))
+
+    def test_multi_action_group_get_is_owner_scoped(self):
+        from apps.dimon_live.database import ActionAttempt
+
+        database = self.app.state.database
+        database.record_attempt(ActionAttempt(
+            request_id="multi-api-request", original_text="three actions",
+            raw_model_output=None, validated_intent=None,
+            outcome="MULTI_ACTION_CONFIRMATION_REQUEST", reason_code=None,
+            response={"outcome": "MULTI_ACTION_CONFIRMATION_REQUEST"},
+        ))
+        group = database.create_pending_multi_action_group(
+            "multi-api-request", "three actions", [
+                {"kind": "BILL_PAYMENT", "child_type": "receipt", "child_id": "r1"},
+                {"kind": "BENEFICIARY_TRANSFER", "child_type": "receipt", "child_id": "r2"},
+            ], payment_auth_amount_minor=20_000,
+        )
+        response = self.request("GET", f"/api/multi-actions/{group['group_id']}")
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(len(response.json()["items"]), 2)
+        self.assertIsNone(database.get_multi_action_group(
+            group["group_id"], user_id="another-user"
+        ))
+
+    def test_multi_action_review_module_is_served(self):
+        response = self.request("GET", "/static/multi_action_review.mjs")
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertIn("Review stock order", response.text)
+
+    def onboarding_body(self, device, *, consent_id=None, rp_id=None):
+        consent_id = consent_id or self.request("POST", "/api/kyc/myinfo").json()["consent_id"]
+        face = self.request("POST", "/api/face/register", json={"consent_id": consent_id, "frames": face_frames()})
+        self.assertIn(face.status_code, (200, 400), face.text)
+        challenge = self.request("POST", "/api/signing/registration-challenge").json()
+        self.assertEqual(challenge["rp_id"], "test")
+        return {
+            "consent_id": consent_id,
+            "challenge_id": challenge["challenge_id"],
+            "credential_kind": "WEBAUTHN_PLATFORM",
+            "credential_id": device.credential_id,
+            "public_key_spki": b64url_encode(device.public_key_spki),
+            "algorithm": -7,
+            "client_data_json": b64url_encode(device.client_data("webauthn.create", challenge["challenge"])),
+            "authenticator_data": b64url_encode(device.authenticator_data(rp_id=rp_id)),
+        }
+
+    def enroll_device(self):
+        self.device = SoftwareAuthenticator("http://test")
+        response = self.request("POST", "/api/kyc/complete", json=self.onboarding_body(self.device))
+        self.assertEqual(response.status_code, 200, response.text)
+
+    def signed_body(self, collection, receipt_id, digest, **sign_options):
+        if not hasattr(self, "device"):
+            self.enroll_device()
+        challenge = self.request(
+            "POST",
+            f"/api/{collection}/{receipt_id}/challenge",
+            json={"receipt_digest": digest},
+        ).json()
+        self.assertIn("challenge_id", challenge, challenge)
+        self.request("POST", "/api/face/verify", json={"challenge_id": challenge["challenge_id"], "frames": face_frames()})
+        return {
+            "receipt_digest": digest,
+            "voice_confirmation": "yes, confirm",
+            "assertion": SoftwareAuthenticator.wire(
+                self.device.sign(challenge, **sign_options)
+            ),
+        }
 
     def post_vague_alicia(self):
         self.extractor.intent = {
@@ -101,7 +319,7 @@ class DimonLiveApiTests(unittest.TestCase):
         response = self.request("GET", "/api/state")
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["accounts"][0]["balance_minor"], 100000)
+        self.assertEqual(response.json()["accounts"][0]["balance_minor"], 200000)
         self.assertTrue(response.json()["demo_mode"])
         self.assertEqual(
             response.json()["model"],
@@ -114,7 +332,7 @@ class DimonLiveApiTests(unittest.TestCase):
         )
         self.assertEqual(paynow["paynow_proxy"], "8695 2933")
 
-    def test_post_action_executes_eligible_transfer(self):
+    def test_post_action_drafts_and_only_a_signed_approval_executes(self):
         response = self.request(
             "POST",
             "/api/actions",
@@ -122,10 +340,131 @@ class DimonLiveApiTests(unittest.TestCase):
         )
 
         self.assertEqual(response.status_code, 200)
+        pending = response.json()
+        self.assertEqual(pending["outcome"], "CLARIFICATION_REQUEST")
         self.assertEqual(
-            response.json()["outcome"], "EXECUTED_SYNTHETIC_TRANSFER"
+            [step["stage"] for step in pending["trace"]][-3:],
+            ["SIGNED_APPROVAL_REQUIRED", "VALIDATION_PASSED", "RISK_POLICY_PASSED"],
         )
-        self.assertEqual(response.json()["state"]["accounts"][0]["balance_minor"], 95000)
+        self.assertEqual(pending["state"]["accounts"][0]["balance_minor"], 200000)
+        choice = pending["receipt_choices"][0]
+
+        unsigned = self.request(
+            "POST",
+            f"/api/receipts/{choice['receipt_id']}/approve",
+            json={"receipt_digest": choice["receipt_digest"]},
+        )
+        self.assertEqual(unsigned.status_code, 422)
+
+        executed = self.request(
+            "POST",
+            f"/api/receipts/{choice['receipt_id']}/approve",
+            json=self.signed_body("receipts", choice["receipt_id"], choice["receipt_digest"]),
+        )
+        self.assertEqual(executed.json()["outcome"], "EXECUTED_SYNTHETIC_TRANSFER")
+        self.assertEqual(executed.json()["state"]["accounts"][0]["balance_minor"], 195000)
+
+    def test_challenge_requires_an_enrolled_device(self):
+        choice = self.post_vague_alicia().json()["receipt_choices"][0]
+
+        response = self.request(
+            "POST",
+            f"/api/receipts/{choice['receipt_id']}/challenge",
+            json={"receipt_digest": choice["receipt_digest"]},
+        )
+
+        self.assertEqual(
+            (response.json()["outcome"], response.json()["reason_code"]),
+            ("BLOCKED", "SIGNING_CREDENTIAL_REQUIRED"),
+        )
+
+    def test_challenge_review_shows_stored_receipt_facts(self):
+        self.enroll_device()
+        choice = self.post_vague_alicia().json()["receipt_choices"][0]
+
+        challenge = self.request(
+            "POST",
+            f"/api/receipts/{choice['receipt_id']}/challenge",
+            json={"receipt_digest": choice["receipt_digest"]},
+        ).json()
+
+        self.assertEqual(challenge["review"]["total_minor"], 500)
+        self.assertEqual(
+            challenge["review"]["items"][0]["recipient_display_name"], "Alicia Powell"
+        )
+        self.assertEqual(
+            [item["credential_id"] for item in challenge["allow_credentials"]],
+            [self.device.credential_id],
+        )
+
+    def test_signature_from_another_origin_is_rejected(self):
+        choice = self.post_vague_alicia().json()["receipt_choices"][0]
+
+        response = self.request(
+            "POST",
+            f"/api/receipts/{choice['receipt_id']}/approve",
+            json=self.signed_body(
+                "receipts",
+                choice["receipt_id"],
+                choice["receipt_digest"],
+                origin="https://attacker.example",
+            ),
+        )
+
+        self.assertEqual(response.json()["reason_code"], "APPROVAL_ORIGIN_MISMATCH")
+        self.assertEqual(len(response.json()["state"]["transactions"]), 0)
+
+    def test_registration_with_foreign_origin_is_refused(self):
+        device = SoftwareAuthenticator("https://attacker.example")
+        response = self.request("POST", "/api/kyc/complete", json=self.onboarding_body(device, rp_id="test"))
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["detail"], "APPROVAL_ORIGIN_MISMATCH")
+
+    def test_devices_can_only_be_registered_through_kyc(self):
+        response = self.request("POST", "/api/signing/credentials", json={})
+        self.assertEqual(response.json()["detail"], "KYC_ONBOARDING_REQUIRED")
+        self.assertEqual(self.request("GET", "/api/kyc").json()["kyc_status"], "PENDING")
+
+        self.enroll_device()
+
+        status = self.request("GET", "/api/kyc").json()
+        self.assertEqual(status["kyc_status"], "VERIFIED")
+        self.assertEqual(status["kyc_method"], "MYINFO")
+        self.assertEqual(status["bound_credential_id"], self.device.credential_id)
+
+    def test_myinfo_consent_is_single_use_and_shows_the_person(self):
+        myinfo = self.request("POST", "/api/kyc/myinfo").json()
+        self.assertEqual(myinfo["person"]["name"], "DEMO USER")
+        self.assertIn("NRIC/FIN", myinfo["requested_attributes"])
+        first = SoftwareAuthenticator("http://test")
+        self.assertEqual(
+            self.request("POST", "/api/kyc/complete", json=self.onboarding_body(first, consent_id=myinfo["consent_id"])).status_code,
+            200,
+        )
+        second = SoftwareAuthenticator("http://test")
+        reused = self.request("POST", "/api/kyc/complete", json=self.onboarding_body(second, consent_id=myinfo["consent_id"]))
+        self.assertEqual(reused.json()["detail"], "KYC_CONSENT_USED")
+
+    def test_only_the_bound_device_can_approve_and_rebinding_revokes_the_old_one(self):
+        self.enroll_device()
+        old_device = self.device
+        choice = self.post_vague_alicia().json()["receipt_choices"][0]
+        stale = self.signed_body("receipts", choice["receipt_id"], choice["receipt_digest"])
+
+        new_device = SoftwareAuthenticator("http://test")
+        self.assertEqual(self.request("POST", "/api/kyc/complete", json=self.onboarding_body(new_device)).status_code, 200)
+
+        refused = self.request("POST", f"/api/receipts/{choice['receipt_id']}/approve", json=stale)
+        self.assertEqual(refused.json()["reason_code"], "CREDENTIAL_UNKNOWN")
+        self.device = new_device
+        accepted = self.request(
+            "POST",
+            f"/api/receipts/{choice['receipt_id']}/approve",
+            json=self.signed_body("receipts", choice["receipt_id"], choice["receipt_digest"]),
+        )
+        self.assertEqual(accepted.json()["outcome"], "EXECUTED_SYNTHETIC_TRANSFER")
+        self.assertNotEqual(old_device.credential_id, new_device.credential_id)
 
     def test_amount_clarification_endpoint_is_strict_and_does_not_recall_model(self):
         self.extractor.intent = {
@@ -214,7 +553,7 @@ class DimonLiveApiTests(unittest.TestCase):
         response = self.request(
             "POST",
             f"/api/receipts/{choice['receipt_id']}/approve",
-            json={"receipt_digest": choice["receipt_digest"]},
+            json=self.signed_body("receipts", choice["receipt_id"], choice["receipt_digest"]),
         )
 
         self.assertEqual(response.status_code, 200)
@@ -294,12 +633,11 @@ class DimonLiveApiTests(unittest.TestCase):
         ):
             with self.subTest(body=body):
                 self.assertEqual(self.request("POST", path, json=body).status_code, 422)
-        first = self.request(
-            "POST", path, json={"receipt_digest": receipt["receipt_digest"]}
+        signed = self.signed_body(
+            "batch-receipts", receipt["receipt_id"], receipt["receipt_digest"]
         )
-        second = self.request(
-            "POST", path, json={"receipt_digest": receipt["receipt_digest"]}
-        )
+        first = self.request("POST", path, json=signed)
+        second = self.request("POST", path, json=signed)
         self.assertEqual(first.status_code, 200)
         self.assertEqual(first.json()["outcome"], "EXECUTED_SYNTHETIC_BATCH")
         self.assertEqual(
@@ -309,17 +647,24 @@ class DimonLiveApiTests(unittest.TestCase):
     def test_valid_shape_wrong_digest_is_non_mutating_block(self):
         choice = self.post_vague_alicia().json()["receipt_choices"][0]
 
+        signed = self.signed_body("receipts", choice["receipt_id"], choice["receipt_digest"])
         response = self.request(
             "POST",
             f"/api/receipts/{choice['receipt_id']}/approve",
-            json={"receipt_digest": "0" * 64},
+            json={**signed, "receipt_digest": "0" * 64},
         )
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(
             (response.json()["outcome"], response.json()["reason_code"]),
-            ("BLOCKED", "RECEIPT_DIGEST_MISMATCH"),
+            ("BLOCKED", "APPROVAL_RECEIPT_MISMATCH"),
         )
+        challenge = self.request(
+            "POST",
+            f"/api/receipts/{choice['receipt_id']}/challenge",
+            json={"receipt_digest": "0" * 64},
+        )
+        self.assertEqual(challenge.json()["reason_code"], "RECEIPT_DIGEST_MISMATCH")
         self.assertEqual(len(response.json()["state"]["transactions"]), 0)
 
     def test_post_action_rejects_blank_text_without_calling_extractor(self):
@@ -362,7 +707,7 @@ class DimonLiveApiTests(unittest.TestCase):
         response = self.request("POST", "/api/reset")
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["accounts"][0]["balance_minor"], 100000)
+        self.assertEqual(response.json()["accounts"][0]["balance_minor"], 200000)
         self.assertEqual(response.json()["transactions"], [])
 
     def test_static_root_is_served_as_html(self):
@@ -370,7 +715,16 @@ class DimonLiveApiTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertTrue(response.headers["content-type"].startswith("text/html"))
-        self.assertIn("Send Alicia Powell S$2.50 from savings.", response.text)
+        self.assertIn("Bank naturally. Approve deliberately.", response.text)
+        self.assertIn('rel="icon" href="/favicon.svg"', response.text)
+
+    def test_favicon_is_served_as_svg(self):
+        for path in ("/favicon.svg", "/favicon.ico"):
+            with self.subTest(path=path):
+                response = self.request("GET", path)
+                self.assertEqual(response.status_code, 200, response.text)
+                self.assertTrue(response.headers["content-type"].startswith("image/svg+xml"))
+                self.assertIn("Dimon", response.text)
 
     def test_static_stylesheet_is_served_as_css(self):
         response = self.request("GET", "/static/app.css")
@@ -378,11 +732,56 @@ class DimonLiveApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertTrue(response.headers["content-type"].startswith("text/css"))
 
+    def test_wake_greeting_audio_is_immutable_cacheable_wav(self):
+        response = self.request("GET", "/static/audio/wake-greeting-v1.wav")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.headers["content-type"].startswith("audio/wav"))
+        self.assertEqual(response.headers["cache-control"], "public, max-age=31536000, immutable")
+        self.assertTrue(response.content.startswith(b"RIFF"))
+
+    def test_voice_enrollment_prompt_audio_is_immutable_cacheable_wav(self):
+        response = self.request("GET", "/static/audio/voice-enrollment-confirmation-v1.wav")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.headers["content-type"].startswith("audio/wav"))
+        self.assertEqual(response.headers["cache-control"], "public, max-age=31536000, immutable")
+        self.assertTrue(response.content.startswith(b"RIFF"))
+
     def test_static_script_is_served_as_javascript(self):
         response = self.request("GET", "/static/app.js")
 
         self.assertEqual(response.status_code, 200)
         self.assertIn("javascript", response.headers["content-type"])
+
+    def test_transaction_display_module_is_served_as_javascript(self):
+        response = self.request("GET", "/static/transaction_display.mjs")
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertIn("javascript", response.headers["content-type"])
+
+    def test_app_module_graph_is_fully_served(self):
+        pending = ["/static/app.js"]
+        visited = set()
+        import_pattern = re.compile(
+            r'''(?:import|export)\s+(?:[^"']*?\s+from\s+)?["'](\.[^"']+)["']'''
+        )
+
+        while pending:
+            module_path = pending.pop()
+            if module_path in visited:
+                continue
+            visited.add(module_path)
+            response = self.request("GET", module_path)
+            self.assertEqual(response.status_code, 200, module_path)
+            self.assertIn("javascript", response.headers["content-type"], module_path)
+            for specifier in import_pattern.findall(response.text):
+                imported_path = posixpath.normpath(
+                    posixpath.join(posixpath.dirname(module_path), specifier)
+                )
+                pending.append(imported_path)
+
+        self.assertIn("/static/transaction_display.mjs", visited)
 
     def test_clarification_client_module_is_served_as_javascript(self):
         response = self.request("GET", "/static/clarification_response.mjs")
@@ -405,6 +804,13 @@ class DimonLiveApiTests(unittest.TestCase):
         self.assertIn("javascript", response.headers["content-type"])
         self.assertIn("accountDisplay", response.text)
 
+    def test_banking_shell_module_is_served_as_javascript(self):
+        response = self.request("GET", "/static/banking_shell.mjs")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("javascript", response.headers["content-type"])
+        self.assertIn("renderHomeSummary", response.text)
+
     def test_mobile_voice_assets_are_served_from_same_origin(self):
         capture = self.request("GET", "/static/voice_capture.mjs")
         worklet = self.request("GET", "/static/voice_capture_worklet.js")
@@ -416,6 +822,27 @@ class DimonLiveApiTests(unittest.TestCase):
         self.assertIn("javascript", worklet.headers["content-type"])
         self.assertEqual(failure.status_code, 200)
         self.assertIn("javascript", failure.headers["content-type"])
+
+    def test_result_audio_client_is_served_from_same_origin(self):
+        response = self.request("GET", "/static/result_audio.mjs")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("javascript", response.headers["content-type"])
+        self.assertIn("waitForAudioArtifact", response.text)
+
+    def test_identity_feedback_module_is_served_from_same_origin(self):
+        response = self.request("GET", "/static/identity_feedback.mjs")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("javascript", response.headers["content-type"])
+        self.assertIn("IDENTITY_VERIFICATION_FAILURE_MESSAGE", response.text)
+
+    def test_audio_prebuffer_module_is_served_from_same_origin(self):
+        response = self.request("GET", "/static/audio_prebuffer.mjs")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("javascript", response.headers["content-type"])
+        self.assertIn("RollingAudioPrebuffer", response.text)
 
     def test_voice_client_diagnostic_logs_only_bounded_failure_metadata(self):
         with self.assertLogs("apps.dimon_live.app", level="WARNING") as captured:
@@ -429,7 +856,7 @@ class DimonLiveApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 204)
         self.assertIn("stage=worklet_module", captured.output[0])
         self.assertIn("error_name=AbortError", captured.output[0])
-        self.assertIn("Mobile Safari test", captured.output[0])
+        self.assertNotIn("Mobile Safari test", captured.output[0])
 
     def test_static_script_supports_enter_to_submit_and_shift_enter_for_newline(self):
         script = self.request("GET", "/static/app.js").text
@@ -445,9 +872,13 @@ class DimonLiveApiTests(unittest.TestCase):
 
         self.assertEqual(client_response.status_code, 200)
         self.assertIn("candidate-choice", script)
-        self.assertIn("requestReceiptApproval(choice)", script)
+        self.assertIn("requestReceiptApproval,", script)
+        self.assertIn("deviceApprover.signChallenge(issued.challenge)", script)
         self.assertIn("/api/receipts/${choice.receipt_id}/approve", client)
-        self.assertIn("receipt_digest: choice.receipt_digest", client)
+        self.assertIn("receipt_digest: choice.receipt_digest, ...signed", client)
+        device = self.request("GET", "/static/device_approval.mjs")
+        self.assertEqual(device.status_code, 200)
+        self.assertIn('userVerification: "required"', device.text)
         self.assertNotIn("function candidateCommand", script)
         self.assertNotIn(
             "ui.input.value = result.confirmation_command",
@@ -465,7 +896,8 @@ class DimonLiveApiTests(unittest.TestCase):
 
         self.assertIn('"Listening… pause to send"', script)
         self.assertIn('stopVoice({sendStop: false})', script)
-        self.assertIn('waitForResultAudio', script)
+        self.assertIn('waitForAudioArtifact', script)
+        self.assertIn("voiceLocksManualSubmit", script)
 
 
 if __name__ == "__main__":

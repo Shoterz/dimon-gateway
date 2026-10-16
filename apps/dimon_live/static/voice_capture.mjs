@@ -1,6 +1,21 @@
 const TARGET_SAMPLE_RATE = 16_000;
 const FRAME_SAMPLES = 320;
 
+export function voiceLocksManualSubmit(phase) {
+  return !["idle", "complete", "error"].includes(phase);
+}
+
+export function voiceButtonPresentation(phase) {
+  return {
+    idle: {label: "Speak", ariaLabel: "Start listening", action: "speak", disabled: false},
+    starting: {label: "Cancel", ariaLabel: "Cancel microphone startup", action: "stop", disabled: false},
+    listening: {label: "Finish", ariaLabel: "Finish recording and send", action: "stop", disabled: false},
+    understanding: {label: "Processing…", ariaLabel: "Dimon is processing your request", action: "processing", disabled: true},
+    speaking: {label: "Stop reply", ariaLabel: "Stop Dimon’s reply", action: "stop", disabled: false},
+    error: {label: "Try again", ariaLabel: "Try voice input again", action: "speak", disabled: false},
+  }[phase] || {label: "Speak", ariaLabel: "Start listening", action: "speak", disabled: false};
+}
+
 export function createVoiceAudioContext(browserWindow = window) {
   const Constructor = browserWindow.AudioContext || browserWindow.webkitAudioContext;
   if (!Constructor) throw new Error("Web Audio is unavailable");
@@ -8,7 +23,12 @@ export function createVoiceAudioContext(browserWindow = window) {
 }
 
 export class VoiceDeadline {
-  constructor(schedule = setTimeout, cancel = clearTimeout) {
+  // Wrap the timer globals: browsers throw "Illegal invocation" when
+  // setTimeout is called as a method of this object.
+  constructor(
+    schedule = (callback, delayMs) => setTimeout(callback, delayMs),
+    cancel = token => clearTimeout(token),
+  ) {
     this.schedule = schedule;
     this.cancel = cancel;
     this.token = null;
