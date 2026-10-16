@@ -1,5 +1,9 @@
 # Dimon Gateway
 
+<p align="center">
+  <img src="submission/assets/dimon-cover-source.png" alt="Dimon voice banking home screen" width="900">
+</p>
+
 **Say it. Watch it settle.**
 
 Dimon is a banking assistant you can talk to. You type or say what you want,
