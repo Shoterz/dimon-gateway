@@ -102,7 +102,7 @@ The local-only original export is:
 - Source repository: `https://github.com/Shoterz/dimon-gateway`
 - Main branch: `https://github.com/Shoterz/dimon-gateway/tree/main`
 - Demo video: `https://youtu.be/s2UBePD_5Y0`
-- Live project, optional: **ADD VERIFIED URL OR WRITE N/A**
+- Live project: `https://dimon.stocksuite.app/`
 
 ## Demo video coverage
 
