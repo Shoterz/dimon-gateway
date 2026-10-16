@@ -44,7 +44,10 @@ _CREDENTIAL_ASSIGNMENT = re.compile(
 )
 _SERVICE_KEY_ASSIGNMENT = re.compile(
     r"(?m)^\s*[A-Z][A-Z0-9_.-]*SERVICE[_-]?KEY[A-Z0-9_.-]*"
-    r"[ \t]*[:=][ \t]*['\"]?([A-Za-z0-9+/_.=-]{8,})"
+    r"[ \t]*[:=][ \t]*(?P<value>[!-~]{8,})"
+)
+_SERVICE_KEY_PLACEHOLDERS = frozenset(
+    {"<owner-supplied-value>", "<shared-key>"}
 )
 _SECRET_PATTERNS = (
     (re.compile(r"cfast_[A-Za-z0-9]{48}"), "credential-like Cloudflare service secret"),
@@ -117,8 +120,13 @@ def content_violations(content: str) -> list[str]:
             reasons.append(reason)
     if _CREDENTIAL_ASSIGNMENT.search(content):
         reasons.append("credential-like assigned value")
-    if _SERVICE_KEY_ASSIGNMENT.search(content):
-        reasons.append("credential-like assigned value")
+    for match in _SERVICE_KEY_ASSIGNMENT.finditer(content):
+        value = match.group("value")
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+            value = value[1:-1]
+        if value not in _SERVICE_KEY_PLACEHOLDERS:
+            reasons.append("credential-like assigned value")
+            break
     return reasons
 
 

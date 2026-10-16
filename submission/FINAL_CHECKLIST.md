@@ -10,21 +10,22 @@
 - [x] Cover image is 16:9 and exactly 380 × 216 pixels.
 - [x] Three CodeBuddy chat screenshots are present.
 - [x] Original CodeBuddy conversation export is preserved locally for upload.
-- [ ] Add the final demo-video URL and confirm public/viewer access.
+- [x] Final demo-video URL added: `https://youtu.be/s2UBePD_5Y0`.
+- [ ] Confirm public/viewer access to the demo video.
 - [ ] Add a verified live-project URL, or enter N/A.
 - [ ] Add team/member details exactly as registered in the hackathon portal.
 
 ## Release gate
 
-- [ ] Full Python test suite passes from the release tree.
-- [ ] JavaScript syntax checks pass.
+- [x] Full Python test suite passes from the release tree.
+- [x] JavaScript syntax checks pass.
 - [ ] Repository boundary scan passes on the committed tree.
 - [ ] A clean clone starts in fixture mode without secrets or model downloads.
 - [ ] Active `.env` files, service keys, ledgers, model weights, runtime audio,
   private deployment state, and the competition PDF are absent from Git.
-- [ ] A sanitized squash release is committed on `main`; secret-bearing
+- [x] A sanitized squash release is committed on `main`; secret-bearing
   `develop` history is not merged, fast-forwarded, or pushed again.
-- [ ] The previously exposed inference service key is revoked and replaced.
+- [x] The previously exposed inference service key is revoked and replaced.
 - [ ] `origin/main` points to the verified release commit.
 - [ ] Release source archive and checksums are generated.
 

@@ -101,7 +101,7 @@ The local-only original export is:
 
 - Source repository: `https://github.com/Shoterz/dimon-gateway`
 - Main branch: `https://github.com/Shoterz/dimon-gateway/tree/main`
-- Demo video: **ADD FINAL VIDEO URL**
+- Demo video: `https://youtu.be/s2UBePD_5Y0`
 - Live project, optional: **ADD VERIFIED URL OR WRITE N/A**
 
 ## Demo video coverage

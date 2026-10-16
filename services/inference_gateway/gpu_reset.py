@@ -64,14 +64,22 @@ async def _nvidia_compute_pids() -> set[int]:
         raise GpuStackResetError("GPU_RELEASE_UNVERIFIED") from exc
     if process.returncode != 0:
         raise GpuStackResetError("GPU_RELEASE_UNVERIFIED")
+    try:
+        lines = stdout.decode("ascii").splitlines()
+    except UnicodeDecodeError as exc:
+        raise GpuStackResetError("GPU_RELEASE_UNVERIFIED") from exc
     pids: set[int] = set()
-    for line in stdout.decode("ascii", errors="ignore").splitlines():
-        try:
-            pid = int(line.strip())
-        except ValueError:
+    for line in lines:
+        value = line.strip()
+        if not value:
             continue
-        if pid > 0:
-            pids.add(pid)
+        try:
+            pid = int(value)
+        except ValueError as exc:
+            raise GpuStackResetError("GPU_RELEASE_UNVERIFIED") from exc
+        if pid <= 0:
+            raise GpuStackResetError("GPU_RELEASE_UNVERIFIED")
+        pids.add(pid)
     return pids
 
 

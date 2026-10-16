@@ -3,6 +3,9 @@
 This folder contains the copy-ready material for the Tencent Cloud CodeBuddy
 Hackathon submission.
 
+Submit through the official
+[Tencent Cloud Hackathon project form](https://tinyurl.com/TCHackathonSGProjectSubmission).
+
 | Deliverable | File |
 | --- | --- |
 | Portal answers | [`FORM_ANSWERS.md`](FORM_ANSWERS.md) |
@@ -15,4 +18,5 @@ Hackathon submission.
 The original CodeBuddy JSONL export is copied locally to `submission/private/`
 for form upload but is intentionally excluded from Git because it contains a
 personal workstation path. The demo video is not stored in the repository; add
-its final upload link to `FORM_ANSWERS.md` before submitting.
+its final upload link to `FORM_ANSWERS.md` before submitting. The current link
+has been added there.

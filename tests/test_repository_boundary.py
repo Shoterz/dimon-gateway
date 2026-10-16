@@ -62,6 +62,7 @@ class ContentViolationTests(unittest.TestCase):
             "api_key=" + "s" + "k-abcdefghijklmnopqrstuvwxyz012345": "credential",
             "CF_ACCESS_CLIENT_SECRET=" + "1" * 64: "credential",
             "DIMON_INFERENCE_" + "SERVICE_KEY=" + "x" * 32: "credential",
+            "DIMON_INFERENCE_" + "SERVICE_KEY=" + "!@#$%^&*()[]{}:;,?~" * 2: "credential",
             "DIMON_INFERENCE_" + "SERVICE_KEY=" + "james" + "bond007": "credential",
             "-----BEGIN " + "PRIVATE KEY-----": "private key",
         }
@@ -80,6 +81,7 @@ class ContentViolationTests(unittest.TestCase):
                 "model=${QWEN_MODEL_PATH}",
                 "home=/home/<user>/models",
                 "CF_ACCESS_CLIENT_SECRET=<replace-me>",
+                "DIMON_INFERENCE_SERVICE_KEY=<owner-supplied-value>",
                 "api_key=example-only",
             )
         )

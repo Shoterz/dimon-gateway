@@ -15,6 +15,7 @@ from apps.dimon_live.gpu_overlord_status import (
 from services.inference_gateway.gpu_reset import (
     GpuStackResetError,
     SystemdGpuStackResetter,
+    _nvidia_compute_pids,
     remove_verified_stale_socket,
 )
 
@@ -51,6 +52,22 @@ class ResetStatusClient:
 
 
 class GpuStackResetTests(unittest.TestCase):
+    def test_nvidia_pid_reader_rejects_malformed_success_output(self) -> None:
+        async def scenario() -> str:
+            process = SimpleNamespace(
+                returncode=0,
+                communicate=AsyncMock(return_value=(b"N/A\n", b"")),
+            )
+            with patch(
+                "services.inference_gateway.gpu_reset.asyncio.create_subprocess_exec",
+                new=AsyncMock(return_value=process),
+            ):
+                with self.assertRaises(GpuStackResetError) as captured:
+                    await _nvidia_compute_pids()
+            return captured.exception.reason_code
+
+        self.assertEqual(asyncio.run(scenario()), "GPU_RELEASE_UNVERIFIED")
+
     def test_refuses_to_stop_workers_when_initial_status_is_unavailable(self) -> None:
         async def scenario():
             events: list[str] = []
